@@ -68,8 +68,7 @@ use super::capture::downmix_to_mono;
 /// Bound: 2 seconds × 48 000 Hz = 96 000 samples.  When the queue would
 /// exceed this limit, the oldest samples are dropped so latency never grows
 /// unbounded (overrun protection).
-pub type SharedOriginalQueue =
-    std::sync::Arc<parking_lot::Mutex<std::collections::VecDeque<f32>>>;
+pub type SharedOriginalQueue = std::sync::Arc<parking_lot::Mutex<std::collections::VecDeque<f32>>>;
 
 /// Maximum number of samples held in the original-audio tap queue.
 /// 2 s × 48 000 Hz = 96 000 samples.
@@ -77,9 +76,9 @@ pub const ORIG_QUEUE_CAP: usize = 48_000 * 2;
 
 /// Create a new, empty original-audio tap queue.
 pub fn new_original_queue() -> SharedOriginalQueue {
-    std::sync::Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(
-        ORIG_QUEUE_CAP,
-    )))
+    std::sync::Arc::new(parking_lot::Mutex::new(
+        std::collections::VecDeque::with_capacity(ORIG_QUEUE_CAP),
+    ))
 }
 
 /// Push 48 kHz mono samples from the mic into the original-audio tap queue.
@@ -130,15 +129,33 @@ pub const EST_LATENCY_MS: u32 = 1200;
 
 // ── Task 4.4: latency metric helpers ─────────────────────────────────────────
 
-/// Fixed estimate of capture resample + PCM16-encode cost (ms).
+/// Fixed estimate of capture resample + PCM16-encode + uplink chunking cost
+/// (ms).
 ///
 /// This covers the 48→24 kHz resample in the graph loop plus f32→PCM16
-/// conversion and `try_send` overhead.  Runbook-tuned: actual cost is
-/// typically 1–5 ms for a 480-sample chunk; 10 ms is a conservative upper
-/// bound that keeps the total latency estimate honest.
+/// conversion, `try_send` overhead, and the average wait introduced by the
+/// 40 ms OpenAI uplink chunker.  The fixed part is usually below 10 ms; the
+/// chunker contributes ~20 ms on average and 40 ms worst-case.
 ///
 /// Update this constant after profiling with the runbook selfcheck.
-pub const CAPTURE_TO_SEND_EST_MS: u32 = 10;
+pub const CAPTURE_TO_SEND_EST_MS: u32 = 30;
+
+/// OpenAI uplink sample rate after graph resampling.
+pub const OPENAI_UPLINK_SAMPLE_RATE: u32 = 24_000;
+
+/// Fixed OpenAI uplink chunk duration.
+pub const OPENAI_UPLINK_CHUNK_MS: u32 = 40;
+
+/// Fixed OpenAI uplink chunk size: 40 ms of mono 24 kHz PCM16.
+pub const OPENAI_UPLINK_CHUNK_SAMPLES: usize =
+    (OPENAI_UPLINK_SAMPLE_RATE as usize * OPENAI_UPLINK_CHUNK_MS as usize) / 1000;
+
+/// Bounded queue depth from graph → realtime transport.
+///
+/// At 40 ms per chunk this caps queued uplink audio at 320 ms.  Older chunks are
+/// dropped on backpressure by `try_send`; the queue must not grow into seconds
+/// of delayed microphone audio.
+pub const OPENAI_UPLINK_QUEUE_BOUND: usize = 8;
 
 /// Convert ring-buffer unread frames to milliseconds at 48 kHz mono.
 ///
@@ -294,7 +311,11 @@ mod tests {
         assert_eq!(frames_to_ms_48k(480), 10, "480 frames → 10 ms");
         assert_eq!(frames_to_ms_48k(48_000), 1_000, "48000 frames → 1000 ms");
         assert_eq!(frames_to_ms_48k(96_000), 2_000, "96000 frames → 2000 ms");
-        assert_eq!(frames_to_ms_48k(47), 0, "47 frames → 0 ms (sub-ms truncation)");
+        assert_eq!(
+            frames_to_ms_48k(47),
+            0,
+            "47 frames → 0 ms (sub-ms truncation)"
+        );
     }
 
     /// TDD (Red→Green) for `should_emit_latency`.
@@ -618,7 +639,10 @@ mod tests {
         push_original_samples(&q, &samples);
 
         let len = q.lock().len();
-        assert_eq!(len, ORIG_QUEUE_CAP, "queue must be capped at {ORIG_QUEUE_CAP}");
+        assert_eq!(
+            len, ORIG_QUEUE_CAP,
+            "queue must be capped at {ORIG_QUEUE_CAP}"
+        );
 
         // First element should be sample[100] (the 101st pushed).
         let first = q.lock().front().copied().unwrap();

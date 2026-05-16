@@ -112,7 +112,11 @@ mod tests {
         let s = sine(440.0, 44100, 44100);
         let out = resample(&s, 44100, 24000);
         let expected = 44100.0 * 24000.0 / 44100.0;
-        assert!((out.len() as f64 - expected).abs() < 3.0, "len {}", out.len());
+        assert!(
+            (out.len() as f64 - expected).abs() < 3.0,
+            "len {}",
+            out.len()
+        );
     }
 
     #[test]

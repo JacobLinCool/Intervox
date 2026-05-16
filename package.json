@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:app": "scripts/build_app.sh",
+    "build:app:release": "scripts/build_app.sh --release",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",

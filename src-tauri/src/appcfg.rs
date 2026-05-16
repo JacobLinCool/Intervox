@@ -7,8 +7,8 @@ use intervox_core::Config;
 /// Returns the canonical config file path:
 /// `~/Library/Application Support/app.intervox.desktop/config.json` on macOS.
 pub fn config_path() -> PathBuf {
-    let base = dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
+    let base =
+        dirs::config_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
     base.join("app.intervox.desktop").join("config.json")
 }
 
@@ -33,6 +33,11 @@ pub fn persist(cfg: &Config) {
     let p = config_path();
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let _ = cfg.save(&p);
 }

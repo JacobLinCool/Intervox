@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "$lib/store.svelte";
   import { COMMON_LANGS } from "$lib/constants";
   import { Glyph, Check, Dot, SysIcon, LangChip } from "$lib/icons";
@@ -15,7 +16,8 @@
   let keyError = $state<string | null>(null);
 
   // Step 2 (Mic permission)
-  let micRequested = $state(false);
+  let requestingMic = $state(false);
+  let micError = $state<string | null>(null);
 
   // Step 3 (Driver) — install attempted flag for error display
   let driverAttempted = $state(false);
@@ -39,7 +41,7 @@
   // ── Derived: canNext ────────────────────────────────────────
   const canNext = $derived(
     step === 1 ? store.account.verified :
-    step === 2 ? micRequested :
+    step === 2 ? store.micPermission === "granted" :
     step === 3 ? (store.status?.virtualMicInstalled === true) :
     true
   );
@@ -47,7 +49,9 @@
   // ── Navigation ──────────────────────────────────────────────
   async function next() {
     if (step < steps.length - 1) {
-      step = step + 1;
+      const nextStep = step + 1;
+      if (nextStep === 6) store.resetAudioInputDetection();
+      step = nextStep;
     } else {
       await store.completeOnboarding();
     }
@@ -80,6 +84,54 @@
     keyError = null;
   }
 
+  // ── Step 2: Mic permission helpers ───────────────────────────
+  const micPermissionCopy = $derived(
+    requestingMic ? "Waiting for macOS permission…" :
+    store.micPermission === "granted" ? "Access granted." :
+    store.micPermission === "denied" ? "Access is denied. Open System Settings, enable Intervox, then return here." :
+    store.micPermission === "restricted" ? "Microphone access is restricted by a system policy." :
+    "Required to translate your voice."
+  );
+
+  const micPermissionLabel = $derived(
+    store.micPermission === "granted" ? "Allowed" :
+    store.micPermission === "denied" ? "Denied" :
+    store.micPermission === "restricted" ? "Restricted" :
+    "Not allowed"
+  );
+
+  async function requestMicrophone() {
+    micError = null;
+    requestingMic = true;
+    try {
+      await store.requestMicPermission();
+    } catch (e: unknown) {
+      micError = (e as { message?: string })?.message ?? "Couldn't check microphone access.";
+    } finally {
+      requestingMic = false;
+      await store.refreshMicPermission();
+    }
+  }
+
+  $effect(() => {
+    if (step === 2) void store.refreshMicPermission();
+  });
+
+  onMount(() => {
+    const refresh = () => {
+      if (store.onboardingOpen && step === 2) void store.refreshMicPermission();
+    };
+    const refreshWhenVisible = () => {
+      if (!document.hidden) refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  });
+
   // ── Step 3: Driver install ───────────────────────────────────
   async function installDriver() {
     driverAttempted = true;
@@ -92,18 +144,22 @@
     // store.lastError will be set on failure — component reads it honestly
   }
 
-  // ── Step 6: Test — start test once when step===6 ────────────
-  let testStarted = $state(false);
+  // Step 4 and Step 6 need a dedicated input-level probe because the live
+  // engine can still be in Silence mode during onboarding.
   $effect(() => {
-    if (step === 6 && !testStarted) {
-      testStarted = true;
-      store.startTest();
-    }
+    if (step !== 4 && step !== 6) return;
+    void store.startMicLevelProbe();
+    return () => {
+      void store.stopMicLevelProbe();
+    };
   });
 
   // Derived test stage from real store state (no setTimeout)
   const testStage = $derived(
-    store.tgtText ? "done" : (store.srcText ? "translating" : "listen")
+    store.tgtText ? "done" :
+    store.srcText ? "translating" :
+    store.audioInputDetected ? "heard" :
+    "listen"
   );
 
   // ── Meeting meta ─────────────────────────────────────────────
@@ -368,7 +424,7 @@
                       <path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5" stroke-linecap="round"/>
                     </svg>
                   </span>
-                  <span>Stored in your Mac's Keychain. Never sent to Intervox servers.</span>
+                  <span>Stored in the local Intervox config file. Never sent to Intervox servers.</span>
                 </div>
                 <!-- KeyPoint: card -->
                 <div style={css({ display: "flex", gap: 9, alignItems: "flex-start", fontSize: 12, color: "var(--txt-2)", lineHeight: 1.45 })}>
@@ -389,8 +445,8 @@
                     </svg>
                   </span>
                   <span>Don't have a key? <a href="https://platform.openai.com/api-keys"
-                        style={css({ color: "var(--c-mixed)", textDecoration: "underline", textUnderlineOffset: 2 })}
-                        onclick={(e) => e.preventDefault()}>
+                        style={css({ color: "var(--c-mixed)", textDecoration: "underline", textUnderlineOffset: 2, cursor: "pointer" })}
+                        onclick={(e) => { e.preventDefault(); store.openExternalUrl("https://platform.openai.com/api-keys"); }}>
                         Create one at platform.openai.com</a>.</span>
                 </div>
               </div>
@@ -413,26 +469,45 @@
             <div class="card" style={css({ padding: 20, display: "flex", gap: 16, alignItems: "center" })}>
               <div style={css({
                 width: 56, height: 56, borderRadius: 14,
-                background: micRequested ? "color-mix(in oklch, var(--c-translate) 18%, transparent)" : "rgba(120,120,128,0.14)",
+                background: store.micPermission === "granted" ? "color-mix(in oklch, var(--c-translate) 18%, transparent)" : "rgba(120,120,128,0.14)",
                 display: "grid", placeItems: "center",
-                color: micRequested ? "var(--c-translate)" : "var(--txt-2)",
+                color: store.micPermission === "granted" ? "var(--c-translate)" : "var(--txt-2)",
               })}>
                 <SysIcon name="mic" size={28} />
               </div>
               <div style={css({ flex: 1 })}>
                 <div style={css({ fontSize: 14, fontWeight: 500 })}>Microphone access</div>
                 <div style={css({ fontSize: 12.5, color: "var(--txt-3)", marginTop: 2 })}>
-                  {micRequested ? "Opened Settings — click Continue when access is granted." : "Required to translate your voice."}
+                  {micPermissionCopy}
                 </div>
+                {#if micError}
+                  <div style={css({ fontSize: 12, color: "var(--c-error)", marginTop: 6 })}>{micError}</div>
+                {/if}
               </div>
-              {#if micRequested}
+              {#if store.micPermission === "granted"}
                 <span style={css({ display: "flex", alignItems: "center", gap: 6, color: "var(--c-translate)", fontSize: 13, fontWeight: 500 })}>
-                  <SysIcon name="ok" size={14} /> Allowed
+                  <SysIcon name="ok" size={14} /> {micPermissionLabel}
                 </span>
               {:else}
-                <button class="btn primary" onclick={async () => { micRequested = true; await store.openMicPermission(); }}>
-                  Allow Microphone
-                </button>
+                <div style={css({ display: "flex", gap: 8, alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap" })}>
+                  <span style={css({ display: "flex", alignItems: "center", gap: 6, color: "var(--txt-2)", fontSize: 13, fontWeight: 500 })}>
+                    <SysIcon name="warn" size={14} /> {micPermissionLabel}
+                  </span>
+                  {#if store.micPermission === "notDetermined"}
+                    <button class="btn primary" disabled={requestingMic} onclick={requestMicrophone}>
+                      {requestingMic ? "Requesting…" : "Allow Microphone"}
+                    </button>
+                  {:else if store.micPermission === "denied"}
+                    <button class="btn primary" onclick={async () => { await store.openMicPermission(); }}>
+                      Open Settings
+                    </button>
+                  {/if}
+                  {#if store.micPermission !== "restricted"}
+                    <button class="btn" onclick={() => store.refreshMicPermission()}>
+                      Check Again
+                    </button>
+                  {/if}
+                </div>
               {/if}
             </div>
 
@@ -613,17 +688,18 @@
               <div style={css({ display: "flex", alignItems: "center", gap: 12 })}>
                 <div style={css({
                   width: 44, height: 44, borderRadius: 12,
-                  background: testStage === "done"
+                  background: testStage === "done" || testStage === "heard"
                     ? "color-mix(in oklch, var(--c-translate) 18%, transparent)"
                     : "color-mix(in oklch, var(--c-mixed) 14%, transparent)",
-                  color: testStage === "done" ? "var(--c-translate)" : "var(--c-mixed)",
+                  color: testStage === "done" || testStage === "heard" ? "var(--c-translate)" : "var(--c-mixed)",
                   display: "grid", placeItems: "center",
                 })}>
                   <SysIcon name="mic" size={22} />
                 </div>
                 <div style={css({ flex: 1 })}>
                   <div style={css({ fontSize: 13, fontWeight: 500 })}>
-                    {testStage === "listen" ? "Listening… (test audio not wired yet)" :
+                    {testStage === "listen" ? "Listening…" :
+                     testStage === "heard" ? "Audio input detected." :
                      testStage === "translating" ? `Translating to ${store.targetLang.name}…` :
                      "Heard you loud and clear."}
                   </div>

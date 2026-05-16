@@ -5,11 +5,14 @@
 //! read path never allocates, never blocks, and yields silence on underrun
 //! (non-negotiable rules §19.4, §19.5).
 
-use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// 48 kHz mono * 8 seconds (spec §9.4).
 pub const RING_BUFFER_CAPACITY: usize = 384_000;
+/// Live virtual-mic output must stay current.  The 8 s capacity is a safety
+/// window, not a FIFO latency budget; once the consumer falls behind, keep only
+/// the newest 100 ms and drop older unread audio.
+pub const LIVE_MAX_UNREAD_FRAMES: usize = 4_800;
 /// ASCII "IVOX".
 pub const RING_MAGIC: u32 = 0x49_56_4F_58;
 pub const RING_VERSION: u32 = 1;
@@ -26,11 +29,11 @@ pub struct SharedAudioRingBuffer {
     pub generation: AtomicU64,
     pub mode: AtomicU32,
     _pad: u32,
-    frames: [UnsafeCell<f32>; RING_BUFFER_CAPACITY],
+    frames: [AtomicU32; RING_BUFFER_CAPACITY],
 }
 
-// Safe: access is disciplined SPSC via atomic indices; only the producer
-// writes a slot before publishing its index, only the consumer reads it after.
+// Safe: every slot is atomic and indices are advanced monotonically. The
+// producer may drop old unread frames to keep the virtual mic current.
 unsafe impl Sync for SharedAudioRingBuffer {}
 
 impl SharedAudioRingBuffer {
@@ -39,8 +42,8 @@ impl SharedAudioRingBuffer {
     pub fn new_boxed(sample_rate: u32, channels: u32) -> Box<Self> {
         use std::alloc::{alloc_zeroed, Layout};
         let layout = Layout::new::<Self>();
-        // SAFETY: all-zero is a valid bit pattern for every field (atomics = 0,
-        // f32 = 0.0). We then overwrite the header. Box takes ownership.
+        // SAFETY: all-zero is a valid bit pattern for every field. We then
+        // overwrite the header. Box takes ownership.
         let b = unsafe {
             let ptr = alloc_zeroed(layout) as *mut Self;
             assert!(!ptr.is_null(), "ring buffer allocation failed");
@@ -76,24 +79,92 @@ impl SharedAudioRingBuffer {
         w.wrapping_sub(r)
     }
 
+    pub fn recent_max_abs(&self, frames: usize) -> f32 {
+        let w = self.write_index.load(Ordering::Acquire);
+        let n = frames.min(RING_BUFFER_CAPACITY);
+        let start = w.saturating_sub(n as u64);
+        let mut max_abs = 0.0f32;
+        for i in 0..n {
+            let slot = ((start + i as u64) % self.cap()) as usize;
+            let sample = f32::from_bits(self.frames[slot].load(Ordering::Relaxed));
+            max_abs = max_abs.max(sample.abs());
+        }
+        max_abs
+    }
+
     pub fn set_mode(&self, mode: u32) {
         self.mode.store(mode, Ordering::Release);
     }
 
-    /// Producer side. Writes as many samples as fit; returns the count written
-    /// (older unread data is preserved — caller should keep pace).
+    fn advance_read_index_to(&self, target: u64) {
+        let mut current = self.read_index.load(Ordering::Acquire);
+        while target > current {
+            match self.read_index.compare_exchange_weak(
+                current,
+                target,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    fn trim_unread_to(&self, max_frames: u64) {
+        let w = self.write_index.load(Ordering::Acquire);
+        let r = self.read_index.load(Ordering::Acquire);
+        let unread = w.wrapping_sub(r);
+        if unread > max_frames {
+            self.advance_read_index_to(w - max_frames);
+        }
+    }
+
+    /// Producer side. Writes the newest samples and drops the oldest unread
+    /// frames when necessary. A virtual microphone must stay current; preserving
+    /// minutes-old unread audio is both incorrect and privacy-hostile.
     pub fn write_frames(&self, data: &[f32]) -> usize {
+        if data.is_empty() {
+            return 0;
+        }
+        let data = if data.len() > RING_BUFFER_CAPACITY {
+            &data[data.len() - RING_BUFFER_CAPACITY..]
+        } else {
+            data
+        };
+
         let w = self.write_index.load(Ordering::Relaxed);
         let r = self.read_index.load(Ordering::Acquire);
-        let free = self.cap() - w.wrapping_sub(r);
-        let n = (data.len() as u64).min(free) as usize;
-        for (i, &s) in data.iter().take(n).enumerate() {
+        let unread = w.saturating_sub(r).min(self.cap());
+        let n = data.len();
+        let required = unread + n as u64;
+        if required > self.cap() {
+            self.advance_read_index_to(r + (required - self.cap()));
+        }
+
+        for (i, &s) in data.iter().enumerate() {
             let slot = ((w + i as u64) % self.cap()) as usize;
-            unsafe { *self.frames[slot].get() = s };
+            self.frames[slot].store(s.to_bits(), Ordering::Relaxed);
         }
         self.write_index
             .store(w.wrapping_add(n as u64), Ordering::Release);
         n
+    }
+
+    /// Producer side for continuous live audio.  Writes the newest samples and
+    /// then bounds unread backlog to `LIVE_MAX_UNREAD_FRAMES`, so a paused or
+    /// slow HAL consumer cannot later play seconds of stale microphone audio.
+    pub fn write_live_frames(&self, data: &[f32]) -> usize {
+        let n = self.write_frames(data);
+        self.trim_unread_to(LIVE_MAX_UNREAD_FRAMES as u64);
+        n
+    }
+
+    /// Drop all unread frames without touching sample memory.
+    pub fn clear(&self) {
+        let w = self.write_index.load(Ordering::Acquire);
+        self.advance_read_index_to(w);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Consumer side (driver render thread). Fills `out` entirely; missing
@@ -107,13 +178,12 @@ impl SharedAudioRingBuffer {
         for (i, slot_out) in out.iter_mut().enumerate() {
             if (i as u64) < n as u64 {
                 let slot = ((r + i as u64) % self.cap()) as usize;
-                *slot_out = unsafe { *self.frames[slot].get() };
+                *slot_out = f32::from_bits(self.frames[slot].load(Ordering::Relaxed));
             } else {
                 *slot_out = 0.0;
             }
         }
-        self.read_index
-            .store(r.wrapping_add(n as u64), Ordering::Release);
+        self.advance_read_index_to(r.wrapping_add(n as u64));
         n < out.len()
     }
 }
@@ -177,11 +247,11 @@ impl SharedRingMap {
     pub fn create(name: &str, sample_rate: u32, channels: u32) -> std::io::Result<Self> {
         let cname = Self::norm_name(name);
         unsafe { libc::shm_unlink(cname.as_ptr()) }; // clear any stale object
-        // SAFETY: standard shm_open with explicit mode.
-        // The HAL driver runs as a different uid (`_coreaudiod`), so the
-        // object must be group/other accessible. macOS honors the shm_open
-        // mode argument (subject to umask); `fchmod` on a shm fd returns
-        // EINVAL here, so the mode arg is the right lever.
+                                                     // SAFETY: standard shm_open with explicit mode.
+                                                     // The HAL driver runs as a different uid (`_coreaudiod`), so the
+                                                     // object must be group/other accessible. macOS honors the shm_open
+                                                     // mode argument (subject to umask); `fchmod` on a shm fd returns
+                                                     // EINVAL here, so the mode arg is the right lever.
         let fd = unsafe {
             libc::shm_open(
                 cname.as_ptr(),
@@ -298,6 +368,61 @@ mod tests {
         let underrun = rb.read_into(&mut out);
         assert!(underrun);
         assert_eq!(out, vec![1.0, 2.0, 3.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn overflow_keeps_newest_window() {
+        let rb = SharedAudioRingBuffer::new_boxed(48000, 1);
+        let data: Vec<f32> = (0..(RING_BUFFER_CAPACITY + 2)).map(|i| i as f32).collect();
+        assert_eq!(rb.write_frames(&data), RING_BUFFER_CAPACITY);
+
+        let mut out = vec![0.0; RING_BUFFER_CAPACITY];
+        assert!(!rb.read_into(&mut out));
+        assert_eq!(out[0], 2.0);
+        assert_eq!(
+            out[RING_BUFFER_CAPACITY - 1],
+            (RING_BUFFER_CAPACITY + 1) as f32
+        );
+    }
+
+    #[test]
+    fn live_writes_keep_only_recent_audio() {
+        let rb = SharedAudioRingBuffer::new_boxed(48000, 1);
+        let data: Vec<f32> = (0..(LIVE_MAX_UNREAD_FRAMES + 1000))
+            .map(|i| i as f32)
+            .collect();
+
+        assert_eq!(rb.write_live_frames(&data), data.len());
+        assert_eq!(rb.available_to_read(), LIVE_MAX_UNREAD_FRAMES as u64);
+
+        let mut out = vec![0.0; LIVE_MAX_UNREAD_FRAMES];
+        assert!(!rb.read_into(&mut out));
+        assert_eq!(out[0], 1000.0);
+        assert_eq!(out[LIVE_MAX_UNREAD_FRAMES - 1], (data.len() - 1) as f32);
+    }
+
+    #[test]
+    fn repeated_live_writes_do_not_accumulate_seconds_of_backlog() {
+        let rb = SharedAudioRingBuffer::new_boxed(48000, 1);
+        let chunk = vec![1.0f32; 480];
+
+        for _ in 0..1000 {
+            rb.write_live_frames(&chunk);
+        }
+
+        assert_eq!(rb.available_to_read(), LIVE_MAX_UNREAD_FRAMES as u64);
+    }
+
+    #[test]
+    fn clear_discards_unread_audio() {
+        let rb = SharedAudioRingBuffer::new_boxed(48000, 1);
+        rb.write_frames(&[1.0, 2.0, 3.0]);
+        rb.clear();
+        rb.write_frames(&[0.0, 0.0]);
+
+        let mut out = vec![9.0; 3];
+        assert!(rb.read_into(&mut out));
+        assert_eq!(out, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]

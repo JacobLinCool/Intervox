@@ -3,15 +3,23 @@
 //! These helpers are deliberately total (never panic) and read-only — safe to
 //! call from background tasks or sync command handlers alike.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use serde::{Deserialize, Serialize};
+
+const HAL_DIR: &str = "/Library/Audio/Plug-Ins/HAL";
+const INSTALLED_BUNDLE: &str = "/Library/Audio/Plug-Ins/HAL/Intervox.driver";
+const BUNDLED_DRIVER_REL: &str = "driver/build/Intervox.driver";
 
 // ── Driver state enum ─────────────────────────────────────────────────────────
 
 /// High-level summary of the Intervox HAL driver health.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DriverState {
     /// Driver bundle is not present on disk.
+    #[default]
     Missing,
     /// Driver is on disk but CoreAudio has not loaded it (or it crashed).
     InstalledNotRunning,
@@ -26,13 +34,13 @@ pub enum DriverState {
 
 /// Returns `true` if the HAL driver bundle exists at the canonical path.
 pub fn installed_on_disk() -> bool {
-    std::path::Path::new("/Library/Audio/Plug-Ins/HAL/Intervox.driver").exists()
+    Path::new(INSTALLED_BUNDLE).exists()
 }
 
 /// Returns `true` if any CoreAudio input device name contains "Intervox"
-/// (case-insensitive). Uses the same enumeration as [`crate::devices`].
-pub fn visible_to_coreaudio() -> bool {
-    crate::devices::enumerate()
+/// (case-insensitive) in an already-collected device list.
+pub fn visible_in_devices(devices: &crate::commands::AudioDevices) -> bool {
+    devices
         .inputs
         .iter()
         .any(|d| d.name.to_ascii_lowercase().contains("intervox"))
@@ -47,12 +55,23 @@ pub fn ring_producer_active() -> bool {
 
 // ── Combined state ────────────────────────────────────────────────────────────
 
-/// Compute the overall [`DriverState`] from the individual checks.
-pub fn state() -> DriverState {
+/// Cheap startup state derived from the filesystem only. It never asks
+/// CoreAudio to enumerate devices.
+pub fn state_from_install_only() -> DriverState {
+    if installed_on_disk() {
+        DriverState::InstalledNotRunning
+    } else {
+        DriverState::Missing
+    }
+}
+
+/// Compute the overall [`DriverState`] without triggering a second CoreAudio
+/// device enumeration.
+pub fn state_from_devices(devices: &crate::commands::AudioDevices) -> DriverState {
     if !installed_on_disk() {
         return DriverState::Missing;
     }
-    if !visible_to_coreaudio() {
+    if !visible_in_devices(devices) {
         return DriverState::InstalledNotRunning;
     }
     DriverState::Healthy
@@ -60,32 +79,66 @@ pub fn state() -> DriverState {
 
 // ── Privileged install / uninstall ───────────────────────────────────────────
 
-/// Resolve a repo script to an absolute path. Dev/runbook builds run from the
-/// repo; `CARGO_MANIFEST_DIR` is `src-tauri`, so scripts live at `../scripts`.
-///
-/// TODO(bundle): resolve from app resource dir in a packaged build.
-fn abs(rel_from_repo_root: &str) -> String {
-    let manifest = env!("CARGO_MANIFEST_DIR"); // .../Intervox/src-tauri
-    let root = std::path::Path::new(manifest).parent().unwrap();
-    root.join(rel_from_repo_root).to_string_lossy().into_owned()
+fn bundled_resources_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let contents_dir = exe.parent()?.parent()?;
+    let resources = contents_dir.join("Resources");
+    resources.is_dir().then_some(resources)
 }
 
-/// Build the AppleScript string used to run a repo script with administrator
-/// privileges. Exported for unit-testing the escaping logic.
-///
-/// Escaping order: backslashes first, then double-quotes. The path is embedded
-/// inside a double-quoted shell argument, so both characters must be escaped.
-pub(crate) fn build_osascript(script_abs: &str) -> String {
-    let escaped = script_abs.replace('\\', "\\\\").replace('"', "\\\"");
+#[cfg(debug_assertions)]
+fn dev_driver_bundle() -> PathBuf {
+    let manifest = env!("CARGO_MANIFEST_DIR"); // .../Intervox/src-tauri
+    Path::new(manifest)
+        .parent()
+        .expect("src-tauri must have a repo parent")
+        .join(BUNDLED_DRIVER_REL)
+}
+
+fn driver_bundle_source() -> Result<PathBuf, String> {
+    if let Some(resources) = bundled_resources_dir() {
+        let bundled = resources.join(BUNDLED_DRIVER_REL);
+        if bundled.is_dir() {
+            return Ok(bundled);
+        }
+        return Err(format!(
+            "Bundled Intervox.driver missing at {}",
+            bundled.display()
+        ));
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let dev = dev_driver_bundle();
+        if dev.is_dir() {
+            return Ok(dev);
+        }
+        Err(format!("Dev Intervox.driver missing at {}", dev.display()))
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        Err("Intervox is not running from an app bundle, and no bundled driver is available".into())
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn applescript_quote(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub(crate) fn build_privileged_shell_osascript(command: &str) -> String {
     format!(
-        "do shell script \"INTERVOX_ASSUME_YES=1 /bin/bash \\\"{escaped}\\\" </dev/null\" with administrator privileges"
+        "do shell script \"{}\" with administrator privileges",
+        applescript_quote(command)
     )
 }
 
-/// Run a repo script with administrator privileges via AppleScript. The script
-/// is run non-interactively (`INTERVOX_ASSUME_YES=1`, stdin from /dev/null).
-fn run_priv(script_abs: &str) -> Result<(), String> {
-    let osa = build_osascript(script_abs);
+fn run_privileged_shell(command: &str) -> Result<(), String> {
+    let osa = build_privileged_shell_osascript(command);
     let out = std::process::Command::new("osascript")
         .arg("-e")
         .arg(&osa)
@@ -98,14 +151,94 @@ fn run_priv(script_abs: &str) -> Result<(), String> {
     }
 }
 
+fn run_trust_check(label: &str, command: &mut Command) -> Result<(), String> {
+    let out = command.output().map_err(|e| format!("{label}: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(format!(
+            "{label} failed with status {}{}{}",
+            out.status,
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\nstdout:\n{stdout}")
+            },
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\nstderr:\n{stderr}")
+            }
+        ))
+    }
+}
+
+fn verify_driver_bundle_trust(bundle: &Path) -> Result<(), String> {
+    run_trust_check(
+        "codesign verification",
+        Command::new("codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg("--deep")
+            .arg("--verbose=2")
+            .arg(bundle),
+    )?;
+    run_trust_check(
+        "stapler validation",
+        Command::new("xcrun")
+            .arg("stapler")
+            .arg("validate")
+            .arg(bundle),
+    )?;
+    run_trust_check(
+        "Gatekeeper install assessment",
+        Command::new("spctl")
+            .arg("-a")
+            .arg("-vv")
+            .arg("-t")
+            .arg("install")
+            .arg(bundle),
+    )
+}
+
 /// Install the Intervox HAL driver with administrator privileges.
 pub fn install() -> Result<(), String> {
-    run_priv(&abs("scripts/install_driver.sh"))
+    let source = driver_bundle_source()?;
+    verify_driver_bundle_trust(&source)?;
+    let source = shell_quote(&source.to_string_lossy());
+    let hal_dir = shell_quote(HAL_DIR);
+    let installed = shell_quote(INSTALLED_BUNDLE);
+    let command = format!(
+        r#"set -e
+src={source}
+hal={hal_dir}
+dst={installed}
+test -d "$src" || {{ echo "Bundled driver not found: $src" >&2; exit 1; }}
+mkdir -p "$hal"
+rm -rf "$dst"
+cp -R "$src" "$dst"
+chown -R root:wheel "$dst"
+chmod -R 755 "$dst"
+killall coreaudiod || true
+sleep 2"#
+    );
+    run_privileged_shell(&command)
 }
 
 /// Uninstall the Intervox HAL driver with administrator privileges.
 pub fn uninstall() -> Result<(), String> {
-    run_priv(&abs("scripts/uninstall_driver.sh"))
+    let installed = shell_quote(INSTALLED_BUNDLE);
+    let command = format!(
+        r#"set -e
+dst={installed}
+if [ -d "$dst" ]; then
+  rm -rf "$dst"
+  killall coreaudiod || true
+fi"#
+    );
+    run_privileged_shell(&command)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -121,11 +254,10 @@ mod tests {
         let _result: bool = installed_on_disk();
     }
 
-    /// `state()` is total — it always returns a valid `DriverState` without
-    /// panicking, and (on a machine without the driver) must be `Missing`.
+    /// `state_from_install_only()` is total and never enters CoreAudio.
     #[test]
-    fn state_is_total_and_valid() {
-        let s = state();
+    fn install_only_state_is_total_and_valid() {
+        let s = state_from_install_only();
         // Exhaustively confirm the value is one of the defined variants.
         let _valid = matches!(
             s,
@@ -136,54 +268,48 @@ mod tests {
         );
     }
 
-    /// When the driver is not installed, `state()` returns `Missing`.
-    /// On CI / developer machines without the Intervox HAL bundle this is the
-    /// expected outcome.
     #[test]
-    fn state_missing_when_no_driver() {
-        if !installed_on_disk() {
-            assert_eq!(state(), DriverState::Missing);
-        }
-        // If the driver IS installed, we just skip the assertion — the test
-        // still passes (we don't want to fail on a dev machine with the driver).
+    fn state_from_devices_uses_existing_snapshot() {
+        let devices = crate::commands::AudioDevices {
+            inputs: vec![crate::commands::DeviceInfo {
+                id: "coreaudio:Intervox".into(),
+                name: "Intervox".into(),
+            }],
+            outputs: vec![],
+        };
+        let expected = if installed_on_disk() {
+            DriverState::Healthy
+        } else {
+            DriverState::Missing
+        };
+        assert_eq!(state_from_devices(&devices), expected);
     }
 
-    /// `build_osascript` must properly escape a path containing both a space
-    /// and a double-quote, and must include the required AppleScript keywords.
+    /// `build_privileged_shell_osascript` must escape shell text for an
+    /// AppleScript double-quoted string and request administrator privileges.
     #[test]
-    fn build_osascript_escaping() {
-        // Path with a space and an embedded double-quote — the nastiest case.
-        let path = r#"/usr/local/my scripts/"tricky".sh"#;
-        let script = build_osascript(path);
-
-        // Must contain the required non-interactive env var.
-        assert!(
-            script.contains("INTERVOX_ASSUME_YES=1"),
-            "missing INTERVOX_ASSUME_YES=1 in: {script}"
-        );
-
-        // Must require administrator privileges.
+    fn build_privileged_shell_osascript_escaping() {
+        let script = build_privileged_shell_osascript(r#"echo "quoted"; echo back\slash"#);
         assert!(
             script.contains("with administrator privileges"),
             "missing 'with administrator privileges' in: {script}"
         );
-
-        // An embedded double-quote in the path must become \".
         assert!(
-            script.contains("\\\""),
+            script.contains("\\\"quoted\\\""),
             "embedded quote not escaped to \\\" in: {script}"
         );
-
-        // The /dev/null stdin redirect must be present.
         assert!(
-            script.contains("</dev/null"),
-            "missing </dev/null in: {script}"
+            script.contains("back\\\\slash"),
+            "embedded backslash not escaped in: {script}"
         );
+    }
 
-        // Sanity: the overall outer string is still a well-formed do shell script expression.
-        assert!(
-            script.starts_with("do shell script \""),
-            "AppleScript must start with 'do shell script \"': {script}"
+    #[test]
+    fn shell_quote_handles_spaces_and_single_quotes() {
+        assert_eq!(
+            shell_quote("/tmp/Intervox.driver"),
+            "'/tmp/Intervox.driver'"
         );
+        assert_eq!(shell_quote("/tmp/it's here"), "'/tmp/it'\\''s here'");
     }
 }

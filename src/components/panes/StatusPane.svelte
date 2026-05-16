@@ -3,13 +3,18 @@
   import { MODES } from "$lib/constants";
   import { PaneTitle, FieldGroup, Row } from "$lib/controls";
   import { Glyph, SysIcon } from "$lib/icons";
-  import { VUStrip, VUBars } from "$lib/vu";
+  import { VUStrip, VUBars, formatDbfs } from "$lib/vu";
   import { css } from "$lib/util";
 
   // ── Derived values ──────────────────────────────────────────
   const meta = $derived(MODES.find((m) => m.id === store.mode) ?? MODES[2]);
   const isTranslating = $derived(store.isTranslating);
   const hasError = $derived(!!store.lastError);
+  const selectedSourceName = $derived(
+    store.status?.sourceMicName
+      ?? store.devices.inputs.find((d) => d.id === store.config?.audio.source_mic_id)?.name
+      ?? null
+  );
 
   // ── Driver recovery ─────────────────────────────────────────
   const driverMissing = $derived(store.status?.virtualMicInstalled === false);
@@ -23,10 +28,10 @@
 
   // ── System check rows ───────────────────────────────────────
   const checks = $derived.by(() => {
-    const micPermOk = store.errorKind !== "permission";
+    const micPermOk = store.micPermission === "granted";
     const virtualMicOk = store.status?.virtualMicInstalled === true;
     const keyOk = store.account.verified;
-    const audioInputOk = store.errorKind !== "mic" && !!store.status?.sourceMicName;
+    const sourceMicOk = store.errorKind !== "mic" && !!selectedSourceName;
 
     const rows: Array<{
       ok: boolean;
@@ -65,34 +70,39 @@
           }
         : null,
       keyOk
-        ? store.errorKind === "network"
+        ? store.status?.translation === "failed"
           ? {
               ok: false,
-              label: "Couldn't reach translation service",
-              failLabel: "Couldn't reach translation service",
+              label: "Translation service error",
+              failLabel: store.lastError?.title ?? "Translation service error",
               cta: "Retry",
               onCta: () => store.dismissError(),
             }
-          : store.status?.openaiConnected
-          ? {
-              ok: true,
-              label: "Translation service connected",
-            }
-          : store.mode === "pass"
-          ? {
-              ok: true,
-              label: "Translation service idle",
-              note: "Pass-through does not use translation.",
-            }
-          : {
-              ok: true,
-              label: "Translation service idle",
-            }
+          : store.status?.translation === "connected"
+            ? { ok: true, label: "Translation service connected" }
+            : store.status?.translation === "connecting" ||
+                store.status?.translation === "reconnecting"
+              ? {
+                  ok: true,
+                  label:
+                    store.status?.translation === "connecting"
+                      ? "Connecting to translation service…"
+                      : "Reconnecting to translation service…",
+                }
+              : store.status?.translation === "idle" && store.mode !== "pass"
+                ? { ok: true, label: "Connecting to translation service…" }
+                : store.mode === "pass"
+                  ? {
+                      ok: true,
+                      label: "Translation service idle",
+                      note: "Pass-through does not use translation.",
+                    }
+                  : { ok: true, label: "Translation service idle" }
         : null,
       {
-        ok: audioInputOk,
-        label: `Audio input detected — ${store.status?.sourceMicName ?? "unknown"}`,
-        failLabel: "No audio input detected",
+        ok: sourceMicOk,
+        label: `Source microphone selected — ${selectedSourceName ?? "unknown"}`,
+        failLabel: "No source microphone selected",
         cta: "Choose another microphone",
         onCta: () => store.setSettingsTab("audio"),
       },
@@ -246,7 +256,7 @@
           })}
         >Input</span>
         <span style={css({ marginLeft: "auto", fontSize: 11, color: "var(--txt-3)" })}>
-          {store.status?.sourceMicName ?? "No input device"}
+          {selectedSourceName ?? "No input device"} · {formatDbfs(store.inputLevel)}
         </span>
       </div>
       <VUStrip
@@ -296,7 +306,7 @@
             ? "Original voice"
             : store.mode === "silence"
               ? "Silenced"
-              : "Translated voice"}
+              : "Translated voice"} · {formatDbfs(store.outputLevel)}
         </span>
       </div>
       <VUStrip

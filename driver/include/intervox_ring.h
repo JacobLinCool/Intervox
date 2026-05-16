@@ -13,12 +13,15 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <string.h>
 #include <unistd.h>
 
 #define INTERVOX_RING_CAPACITY 384000u   /* 48 kHz * 8 s */
+/* The capacity is a safety window, not live FIFO latency.  Keep at most
+ * 100 ms unread on the realtime read path; older samples are stale. */
+#define INTERVOX_RING_LIVE_MAX_UNREAD 4800u
 #define INTERVOX_RING_MAGIC    0x49564F58u /* "IVOX" */
 #define INTERVOX_RING_VERSION  1u
 #define INTERVOX_SHM_NAME      "/intervox.ring"
@@ -46,34 +49,11 @@ typedef struct {
     _Atomic uint64_t generation;  /* off 40 */
     _Atomic uint32_t mode;        /* off 48 */
     uint32_t _pad;                /* off 52 */
-    float frames[INTERVOX_RING_CAPACITY]; /* off 56 */
+    _Atomic uint32_t frames[INTERVOX_RING_CAPACITY]; /* f32 bits, off 56 */
 } intervox_ring_t;
 
 _Static_assert(sizeof(intervox_ring_t) == 56u + INTERVOX_RING_CAPACITY * 4u,
                "intervox_ring_t layout must match Rust SharedAudioRingBuffer");
-
-/* Map the shared object (called from StartIO — NOT the realtime IO path).
- * Returns NULL if the producer (app) has not created it yet. */
-static inline intervox_ring_t* intervox_ring_open(int* out_fd) {
-    int fd = shm_open(INTERVOX_SHM_NAME, O_RDWR, 0600);
-    if (fd < 0) {
-        return NULL;
-    }
-    void* p = mmap(NULL, sizeof(intervox_ring_t), PROT_READ | PROT_WRITE,
-                   MAP_SHARED, fd, 0);
-    if (p == MAP_FAILED) {
-        close(fd);
-        return NULL;
-    }
-    intervox_ring_t* rb = (intervox_ring_t*)p;
-    if (rb->magic != INTERVOX_RING_MAGIC || rb->version != INTERVOX_RING_VERSION) {
-        munmap(p, sizeof(intervox_ring_t));
-        close(fd);
-        return NULL;
-    }
-    *out_fd = fd;
-    return rb;
-}
 
 static inline void intervox_ring_close(intervox_ring_t* rb, int fd) {
     if (rb) {
@@ -81,6 +61,17 @@ static inline void intervox_ring_close(intervox_ring_t* rb, int fd) {
     }
     if (fd >= 0) {
         close(fd);
+    }
+}
+
+static inline void intervox_ring_advance_read_index_to(intervox_ring_t* rb,
+                                                       uint64_t target) {
+    uint64_t current =
+        atomic_load_explicit(&rb->read_index, memory_order_acquire);
+    while (target > current &&
+           !atomic_compare_exchange_weak_explicit(
+               &rb->read_index, &current, target, memory_order_release,
+               memory_order_acquire)) {
     }
 }
 
@@ -96,11 +87,28 @@ static inline bool intervox_ring_read(intervox_ring_t* rb, float* out,
     uint64_t r = atomic_load_explicit(&rb->read_index, memory_order_relaxed);
     uint64_t w = atomic_load_explicit(&rb->write_index, memory_order_acquire);
     uint64_t avail = w - r;
+    if (avail > cap) {
+        intervox_ring_advance_read_index_to(rb, w);
+        r = w;
+        avail = 0;
+    } else if (avail > INTERVOX_RING_LIVE_MAX_UNREAD) {
+        r = w - INTERVOX_RING_LIVE_MAX_UNREAD;
+        intervox_ring_advance_read_index_to(rb, r);
+        avail = INTERVOX_RING_LIVE_MAX_UNREAD;
+    }
     uint64_t take = (avail < n) ? avail : n;
     for (uint32_t i = 0; i < n; ++i) {
-        out[i] = (i < take) ? rb->frames[(r + i) % cap] : 0.0f;
+        if (i < take) {
+            uint32_t bits = atomic_load_explicit(&rb->frames[(r + i) % cap],
+                                                 memory_order_relaxed);
+            float sample = 0.0f;
+            memcpy(&sample, &bits, sizeof(sample));
+            out[i] = sample;
+        } else {
+            out[i] = 0.0f;
+        }
     }
-    atomic_store_explicit(&rb->read_index, r + take, memory_order_release);
+    intervox_ring_advance_read_index_to(rb, r + take);
     return take < n;
 }
 

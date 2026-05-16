@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "$lib/store.svelte";
+  import { store, connectionChip } from "$lib/store.svelte";
   import { Glyph, SidebarIcon, Dot } from "$lib/icons";
   import { MODES } from "$lib/constants";
   import { css } from "$lib/util";
@@ -23,21 +23,25 @@
     { id: "advanced",    label: "Advanced",    tint: "var(--c-silence)" },
   ] as const;
 
-  // Health chip
+  // Connection chip
+  const chip = $derived(
+    connectionChip(
+      store.mode,
+      store.status?.translation ?? "idle",
+      store.latencyText,
+      store.lastError?.title ?? null,
+    )
+  );
   const chipColor = $derived(
-    store.health === "error"
+    chip.tone === "error"
       ? "var(--c-error)"
-      : store.health === "warning"
+      : chip.tone === "warn"
         ? "var(--c-pass)"
-        : "var(--c-translate)"
+        : chip.tone === "ok"
+          ? "var(--c-translate)"
+          : "var(--txt-3)"
   );
-  const chipText = $derived(
-    store.health === "error"
-      ? (store.lastError?.title ?? "Something needs attention")
-      : store.health === "warning"
-        ? "Attention needed"
-        : "All systems normal"
-  );
+  const chipText = $derived(chip.text);
 
   // Current sidebar item's label for title bar
   const currentLabel = $derived(
@@ -96,7 +100,7 @@
         })}
       >
         <span style={css({ fontWeight: 600, fontSize: 13 })}>Intervox</span>
-        <span style={css({ fontSize: 10.5, color: "var(--txt-3)" })}>v1.0 (build 482)</span>
+        <span style={css({ fontSize: 10.5, color: "var(--txt-3)" })}>{store.appVersion ? `v${store.appVersion}` : ""}</span>
       </div>
     </div>
 

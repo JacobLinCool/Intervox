@@ -30,19 +30,19 @@ pub mod ring;
 pub mod supervisor;
 pub mod translate_chain;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use intervox_core::{
-    audio::jitter_buffer::JitterBuffer, realtime::events::TranslationEvent,
-    state::VirtualMicMode, Config,
+    audio::jitter_buffer::JitterBuffer, realtime::events::TranslationEvent, state::VirtualMicMode,
+    AppError, Config,
 };
 use parking_lot::Mutex;
 use tauri::Emitter;
 
 use capture::CaptureHandle;
 use ring::{mode_from_u32, mode_to_ring_u32, RingProducer};
-use translate_chain::SharedOriginalQueue;
+use translate_chain::{SharedOriginalQueue, OPENAI_UPLINK_QUEUE_BOUND};
 
 /// Shared slot holding the timestamp of the most recent successful uplink send.
 ///
@@ -73,14 +73,13 @@ type UplinkSlot = Arc<Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
 struct Inner {
     mode: VirtualMicMode,
     source_device_id: Option<String>,
-    source_language: String,
     target_language: String,
     /// The running capture thread handle.  `None` when capture is stopped.
     capture: Option<CaptureHandle>,
     /// Tokio task that emits `"input-level"` and `"output-level"` events ~20 Hz.
     level_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Graph task that reads captured frames from the channel and routes them
-    /// (PassThrough → ring write; Translate → resample + PCM16 → OpenAI uplink).
+    /// (PassThrough → ring write; Translate → 40 ms PCM16 chunks → OpenAI uplink).
     graph_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// OpenAI Realtime websocket transport task (Task 4.1).
     realtime_task: Option<tauri::async_runtime::JoinHandle<()>>,
@@ -96,6 +95,15 @@ struct Inner {
     /// Task 4.5: watcher that detects capture-thread death while the mode still
     /// needs capture and triggers one automatic restart (cap-1 per mode-entry).
     capture_watcher_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Onboarding/source-selection probe. This opens the selected input device
+    /// only to measure RMS and emit `"input-level"` while the live engine stays
+    /// in Silence. It never writes to the virtual mic ring or OpenAI.
+    probe_capture: Option<CaptureHandle>,
+    probe_level_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Task 7: 10 s housekeeping ticker that folds uplink-sample deltas into the
+    /// persisted UsageStore.  Stored so `shutdown()` can abort it before the
+    /// final synchronous fold, preventing a double-write race.
+    fold_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -122,7 +130,8 @@ pub struct Engine {
     /// auto-restart fires so further device-lost errors just surface the error.
     capture_restart_allowed: Arc<AtomicBool>,
     /// Shared uplink slot: Engine writes a Sender when the OpenAI session starts;
-    /// the graph loop (running in spawn_blocking) reads it on every frame.
+    /// the graph loop (running in spawn_blocking) reads it while forming fixed
+    /// 40 ms OpenAI chunks.
     /// See module-level doc for the rationale.
     uplink_slot: UplinkSlot,
     /// Shared original-audio tap queue (Task 4.3): the graph loop pushes 48 kHz
@@ -140,7 +149,6 @@ pub struct Engine {
     original_queue_slot: Arc<Mutex<Option<SharedOriginalQueue>>>,
 
     // ── Task 4.4: latency metrics and OpenAI session lifecycle ────────────────
-
     /// Timestamp of the most recent successful PCM16 uplink send.
     ///
     /// Written by the graph loop (inside `spawn_blocking`) on each successful
@@ -156,6 +164,25 @@ pub struct Engine {
     /// `false` on session stop.  The `pull_task` reads this (via
     /// `should_emit_latency`) to decide whether to emit `"latency-changed"`.
     audio_flowing: Arc<AtomicBool>,
+
+    /// Total uplink PCM16 samples sent to OpenAI since process start. Folded
+    /// into the persisted UsageStore by the engine's housekeeping ticker.
+    pub(crate) uplink_samples: Arc<AtomicU64>,
+
+    /// Tracks how many uplink samples have already been persisted to the
+    /// UsageStore.  Used by Task 7's shutdown flush to detect new samples.
+    pub(crate) uplink_persisted: Arc<AtomicU64>,
+
+    /// Task 8: per-session transcript log (JSON Lines, one file per session).
+    session_log: Arc<crate::transcript_log::SessionLog>,
+
+    /// Task 9: connection lifecycle log (bounded ring + capped file).
+    conn_log: Arc<crate::connection_log::ConnectionLog>,
+
+    /// Whether the tray latency badge is currently enabled (mirrors
+    /// `UiConfig::show_latency_badge`). Updated lock-free by `set_show_latency_badge`
+    /// so the pull_task never needs to read config from disk.
+    show_latency_badge: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Engine {
@@ -169,10 +196,9 @@ impl Engine {
                 .expect("failed to create /intervox.ring — check POSIX shm permissions"),
         );
 
-        let inner = Inner {
+        let mut inner = Inner {
             mode: VirtualMicMode::Silence,
             source_device_id: cfg.audio.source_mic_id.clone(),
-            source_language: cfg.translation.source_language.clone(),
             target_language: cfg.translation.target_language.clone(),
             capture: None,
             level_task: None,
@@ -182,11 +208,43 @@ impl Engine {
             pull_task: None,
             pcm_tx: None,
             capture_watcher_task: None,
+            probe_capture: None,
+            probe_level_task: None,
+            fold_task: None,
         };
 
         // Start in Silence mode.
         ring.set_mode(mode_to_ring_u32(VirtualMicMode::Silence));
         ring.flush_silence();
+
+        // Create the usage-fold Arcs as locals so we can clone them into both
+        // the struct fields and the 10 s housekeeping task (Task 7).
+        let uplink_samples_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let uplink_persisted_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
+        // Usage fold: every 10 s, move the uplink sample delta into the
+        // persisted UsageStore. uplink_persisted tracks the last-folded count.
+        // The handle is stored in Inner so shutdown() can abort the task before
+        // the final synchronous fold, preventing a double-write race.
+        {
+            let samples = std::sync::Arc::clone(&uplink_samples_arc);
+            let persisted = std::sync::Arc::clone(&uplink_persisted_arc);
+            let fold_handle = tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    tick.tick().await;
+                    let now = samples.load(std::sync::atomic::Ordering::Relaxed);
+                    let prev = persisted.swap(now, std::sync::atomic::Ordering::Relaxed);
+                    let delta = now.saturating_sub(prev);
+                    if delta > 0 {
+                        let mut u = crate::usage_store::load();
+                        u.add_samples(delta, &crate::usage_store::current_month_utc());
+                        crate::usage_store::save(&u);
+                    }
+                }
+            });
+            inner.fold_task = Some(fold_handle);
+        }
 
         Self {
             inner: Mutex::new(inner),
@@ -201,7 +259,28 @@ impl Engine {
             audio_flowing: Arc::new(AtomicBool::new(false)),
             session_active: Arc::new(AtomicBool::new(false)),
             capture_restart_allowed: Arc::new(AtomicBool::new(false)),
+            uplink_samples: uplink_samples_arc,
+            uplink_persisted: uplink_persisted_arc,
+            session_log: std::sync::Arc::new(crate::transcript_log::SessionLog::default()),
+            conn_log: std::sync::Arc::new(Default::default()),
+            show_latency_badge: Arc::new(std::sync::atomic::AtomicBool::new(
+                cfg.ui.show_latency_badge,
+            )),
         }
+    }
+
+    /// Returns a cloned `Arc` to the uplink sample counter so callers (e.g.
+    /// the housekeeping ticker in Task 7) can read or persist the count without
+    /// holding any lock.
+    pub fn uplink_samples(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.uplink_samples)
+    }
+
+    /// Returns a cloned `Arc` to the persisted-sample watermark so callers
+    /// (e.g. Task 7's shutdown flush) can read or update the count without
+    /// holding any lock.
+    pub fn uplink_persisted(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.uplink_persisted)
     }
 
     // ── Mode control ──────────────────────────────────────────────────────────
@@ -222,10 +301,12 @@ impl Engine {
         self.mode_atomic
             .store(mode_to_ring_u32(mode), Ordering::Relaxed);
 
-        {
+        let previous_mode = {
             let mut g = self.inner.lock();
+            let previous = g.mode;
             g.mode = mode;
-        }
+            previous
+        };
 
         let routing = intervox_core::FrameRouting::for_mode(mode);
 
@@ -238,26 +319,46 @@ impl Engine {
             self.out_level.store(0, Ordering::Relaxed);
             let _ = self.app.emit("input-level", 0.0f32);
             let _ = self.app.emit("output-level", 0.0f32);
+        } else if mode != previous_mode {
+            // Entering a live mode must start from current audio, not unread
+            // samples left behind by a previous mode or by an inactive consumer.
+            self.ring.clear_unread();
         }
 
         let needs_capture = routing.mic_to_ring || routing.mic_to_openai;
 
-        let mut g = self.inner.lock();
-        if needs_capture && g.capture.is_none() {
-            // Allow exactly one auto-restart per mode-entry (Task 4.5).
-            self.capture_restart_allowed.store(true, Ordering::Relaxed);
-            self.start_capture_locked(&mut g);
-        } else if !needs_capture && g.capture.is_some() {
-            // No auto-restart when capture is intentionally stopped.
-            self.capture_restart_allowed.store(false, Ordering::Relaxed);
-            self.stop_capture_locked(&mut g);
-        }
+        // Capture the target language and whether a new session is being started
+        // before releasing the guard, so we can push "connecting" post-lock (Task 9).
+        let connecting_tgt: Option<String> = {
+            let mut g = self.inner.lock();
+            if needs_capture && g.capture.is_none() {
+                self.stop_level_probe_locked(&mut g);
+                // Allow exactly one auto-restart per mode-entry (Task 4.5).
+                self.capture_restart_allowed.store(true, Ordering::Relaxed);
+                self.start_capture_locked(&mut g);
+            } else if !needs_capture && g.capture.is_some() {
+                // No auto-restart when capture is intentionally stopped.
+                self.capture_restart_allowed.store(false, Ordering::Relaxed);
+                self.stop_capture_locked(&mut g);
+            }
 
-        // ── OpenAI Realtime session lifecycle ─────────────────────────────────
-        if routing.openai_connected && g.realtime_task.is_none() {
-            self.start_openai_session_locked(&mut g);
-        } else if !routing.openai_connected && g.realtime_task.is_some() {
-            self.stop_openai_session_locked(&mut g);
+            // ── OpenAI Realtime session lifecycle ─────────────────────────────────
+            if routing.openai_connected && g.realtime_task.is_none() {
+                let tgt = g.target_language.clone();
+                self.start_openai_session_locked(&mut g);
+                Some(tgt)
+            } else {
+                if !routing.openai_connected && g.realtime_task.is_some() {
+                    self.stop_openai_session_locked(&mut g);
+                }
+                None
+            }
+        }; // inner guard dropped here
+
+        // Task 9: push "connecting" AFTER the inner guard is released — mirrors
+        // the "closed" push pattern at the bottom of stop_openai_session_locked.
+        if let Some(tgt) = connecting_tgt {
+            self.conn_log.push("connecting", format!("target={tgt}"));
         }
     }
 
@@ -272,23 +373,41 @@ impl Engine {
             self.stop_capture_locked(&mut g);
             self.start_capture_locked(&mut g);
         }
+        if g.probe_capture.is_some() {
+            self.stop_level_probe_locked(&mut g);
+            let _ = self.start_level_probe_locked(&mut g);
+        }
     }
 
-    /// Store the source and target language codes.
+    /// Store the target output language code.
     ///
-    /// If an OpenAI session is active, it is restarted so the new languages
-    /// take effect immediately.  Capture is not interrupted.
-    pub fn set_languages(&self, src: String, tgt: String) {
-        let mut g = self.inner.lock();
-        g.source_language = src;
-        g.target_language = tgt;
+    /// If an OpenAI session is active, it is restarted so the new language
+    /// takes effect immediately.  Capture is not interrupted.  (The source
+    /// language is auto-detected by the endpoint and is not configurable.)
+    pub fn set_target_language(&self, tgt: String) {
+        // Capture whether a new session is being started so we can push
+        // "connecting" after the inner guard is dropped (Task 9).
+        let connecting_tgt: Option<String> = {
+            let mut g = self.inner.lock();
+            g.target_language = tgt;
 
-        // If a realtime session is running, restart it with the new languages.
-        // The capture task and graph task continue uninterrupted; only the
-        // OpenAI transport is restarted and the uplink_slot is refreshed.
-        if g.realtime_task.is_some() {
-            self.stop_openai_session_locked(&mut g);
-            self.start_openai_session_locked(&mut g);
+            // If a realtime session is running, restart it with the new language.
+            // The capture task and graph task continue uninterrupted; only the
+            // OpenAI transport is restarted and the uplink_slot is refreshed.
+            if g.realtime_task.is_some() {
+                let new_tgt = g.target_language.clone();
+                self.stop_openai_session_locked(&mut g);
+                self.start_openai_session_locked(&mut g);
+                Some(new_tgt)
+            } else {
+                None
+            }
+        }; // inner guard dropped here
+
+        // Task 9: push "connecting" AFTER the inner guard is released — mirrors
+        // the "closed" push pattern at the bottom of stop_openai_session_locked.
+        if let Some(new_tgt) = connecting_tgt {
+            self.conn_log.push("connecting", format!("target={new_tgt}"));
         }
     }
 
@@ -300,8 +419,50 @@ impl Engine {
             let mut g = self.inner.lock();
             self.stop_openai_session_locked(&mut g);
             self.stop_capture_locked(&mut g);
+            self.stop_level_probe_locked(&mut g);
         }
         self.ring.flush_silence();
+        // Task 7: abort the 10 s fold task before the final synchronous fold so
+        // there is no double-write race between the background ticker and the
+        // shutdown flush below.
+        {
+            let mut g = self.inner.lock();
+            if let Some(h) = g.fold_task.take() {
+                h.abort();
+            }
+        }
+        // Task 7: final usage fold — persist any samples accumulated since the
+        // last 10 s tick so the last partial interval is not lost.
+        {
+            let now = self
+                .uplink_samples()
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let prev = self
+                .uplink_persisted()
+                .swap(now, std::sync::atomic::Ordering::Relaxed);
+            let delta = now.saturating_sub(prev);
+            if delta > 0 {
+                let mut u = crate::usage_store::load();
+                u.add_samples(delta, &crate::usage_store::current_month_utc());
+                crate::usage_store::save(&u);
+            }
+        }
+    }
+
+    /// Start a source-selection microphone level probe.
+    ///
+    /// This is intentionally separate from the live engine capture path. In
+    /// onboarding the app is still in Silence mode, but the user must still see
+    /// whether the selected source microphone is receiving audio.
+    pub fn start_level_probe(&self) -> Result<(), AppError> {
+        let mut g = self.inner.lock();
+        self.start_level_probe_locked(&mut g)
+    }
+
+    /// Stop the source-selection microphone level probe if it is running.
+    pub fn stop_level_probe(&self) {
+        let mut g = self.inner.lock();
+        self.stop_level_probe_locked(&mut g);
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -312,10 +473,37 @@ impl Engine {
         self.inner.lock().mode
     }
 
+    pub fn levels(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.level.load(Ordering::Relaxed)),
+            f32::from_bits(self.out_level.load(Ordering::Relaxed)),
+        )
+    }
+
     /// Shared handle to the ring producer (for the audio pipeline).
     #[allow(dead_code)]
     pub fn ring(&self) -> Arc<RingProducer> {
         Arc::clone(&self.ring)
+    }
+
+    /// End the active transcript session log (used by clear_transcript_history
+    /// so an in-flight session's file is also cleared and not re-created).
+    pub fn end_session_log(&self) {
+        self.session_log.end();
+    }
+
+    /// Returns a cloned `Arc` to the connection log so callers (e.g.
+    /// `get_connection_log`) can snapshot it without holding any engine lock.
+    pub fn conn_log(&self) -> Arc<crate::connection_log::ConnectionLog> {
+        Arc::clone(&self.conn_log)
+    }
+
+    /// Update the tray latency badge toggle without restarting anything.
+    /// Called by `set_ui_config` so the pull_task sees the new value on the
+    /// next ~1 Hz tick without any disk read.
+    pub fn set_show_latency_badge(&self, v: bool) {
+        self.show_latency_badge
+            .store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Internal helpers (called with `inner` lock held) ──────────────────────
@@ -333,8 +521,15 @@ impl Engine {
     ///
     /// Caller must hold the `inner` mutex lock.
     fn start_openai_session_locked(&self, g: &mut Inner) {
-        let key = match crate::secrets::get_key() {
-            Some(k) => k,
+        let cfg = crate::appcfg::load_or_default();
+        let key = match cfg
+            .account
+            .openai_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(k) => k.to_string(),
             None => {
                 let _ = self.app.emit(
                     "error",
@@ -344,14 +539,10 @@ impl Engine {
             }
         };
 
-        let src_lang = g.source_language.clone();
         let tgt_lang = g.target_language.clone();
 
-        // Read session-level config at session-start.
-        // Using `load_or_default()` reads the file-backed config once so that
-        // toggling settings takes effect on the next session start (consistent
-        // with the established pattern for languages/limiter).
-        let cfg = crate::appcfg::load_or_default();
+        // Read session-level config at session-start so toggling settings takes
+        // effect on the next session start.
         let limiter_enabled = cfg.audio.limiter_enabled;
 
         // Read current mode to decide whether to enable the original-audio mix.
@@ -373,9 +564,10 @@ impl Engine {
         };
 
         // Uplink channel: graph loop → realtime transport.
-        // Capacity 64 keeps at most ~1.3 s of audio queued (at 50 ms chunks)
-        // before frames are dropped.  Drops are acceptable; latency is not.
-        let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        // 8 chunks × 40 ms = 320 ms max queued uplink audio before frames are
+        // dropped. Drops are acceptable; seconds of delayed mic audio are not.
+        let (pcm_tx, pcm_rx) =
+            tokio::sync::mpsc::channel::<Vec<i16>>(OPENAI_UPLINK_QUEUE_BOUND);
 
         // Event channel: realtime transport → event consumer.
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<TranslationEvent>(128);
@@ -386,8 +578,7 @@ impl Engine {
         g.pcm_tx = Some(pcm_tx);
 
         // Shared jitter buffer: ev_task pushes, pull_task pulls.
-        let jitter: SharedJitterBuf =
-            Arc::new(Mutex::new(translate_chain::new_jitter_buffer()));
+        let jitter: SharedJitterBuf = Arc::new(Mutex::new(translate_chain::new_jitter_buffer()));
 
         // Task 4.3: original-audio tap queue.
         // Only created and wired for TranslateWithOriginal; stays None for Translate.
@@ -400,6 +591,21 @@ impl Engine {
             *self.original_queue_slot.lock() = None;
             None
         };
+
+        // Task 8: start the per-session transcript log file.
+        // Called while holding the inner lock — no async, no await; just one
+        // synchronous create_dir_all + Mutex write (sub-microsecond path).
+        self.session_log.start(&crate::commands::rfc3339_now());
+        let session_log_task = std::sync::Arc::clone(&self.session_log);
+
+        // Task 9: conn_log "connecting" push happens AFTER the inner guard is
+        // dropped, at each call site (mirrors the "closed" push pattern in
+        // stop_openai_session_locked).  We only clone the Arc here; the actual
+        // push is performed by the caller once it has released `g`.
+        let conn_log_task = std::sync::Arc::clone(&self.conn_log);
+        // Task 8: clone target lang for transcript records in the ev_task
+        // (tgt_lang itself will be moved into the supervisor call below).
+        let ev_tgt_lang = tgt_lang.clone();
 
         // Mark session active before spawning so the supervisor sees the flag
         // immediately (avoids a race where the supervisor checks before the flag
@@ -415,11 +621,11 @@ impl Engine {
         // which propagates to the currently-awaited `run` future.
         let rt_task = tauri::async_runtime::spawn(supervisor::run_supervised(
             key,
-            src_lang,
             tgt_lang,
             pcm_rx,
             ev_tx,
             session_active_rt,
+            self.uplink_samples(),
         ));
         g.realtime_task = Some(rt_task);
 
@@ -428,11 +634,15 @@ impl Engine {
         // Receives `TranslationEvent`s from the realtime transport and:
         //   - OutputAudioDelta → ingest into jitter buffer via translate_chain;
         //     record first-audio timing; set audio_flowing flag.
-        //   - OutputTranscriptDelta → emit "target-transcript-delta" to frontend.
-        //   - InputTranscriptDelta  → emit "source-transcript-delta" to frontend.
+        //   - OutputTranscriptDelta → emit "target-transcript-delta" to frontend;
+        //     accumulate into tgt_seg for persistence.
+        //   - InputTranscriptDelta  → emit "source-transcript-delta" to frontend;
+        //     accumulate into src_seg for persistence.
+        //   - InputTranscriptDone / OutputTranscriptDone → flush the corresponding
+        //     segment to the session log (Task 8).
         //   - Error                 → emit "error" event to frontend.
         //   - SessionUpdated → mark openai_connected=true, emit "status-changed".
-        //   - Closed → mark openai_connected=false, emit "status-changed".
+        //   - Closed → flush both segments, mark openai_connected=false, emit "status-changed".
         //   - Ignored → silently ignore.
         //
         // The resampler is owned by this task (one instance, streaming-safe).
@@ -459,110 +669,229 @@ impl Engine {
             // for this session (so we compute it at most once).
             let mut first_audio_measured = false;
 
-            while let Some(ev) = ev_rx.recv().await {
-                match ev {
-                    TranslationEvent::SessionUpdated => {
-                        // Task 4.4: session is confirmed live by the server.
-                        // Mark openai_connected=true in AppStatus and emit
-                        // "status-changed" — mirrors the lib.rs 5 s-interval
-                        // lock/clone/emit discipline (MutexGuard dropped before emit).
-                        use tauri::Manager as _;
-                        let status_clone = {
-                            let app_handle =
-                                ev_app.state::<crate::commands::AppHandle>();
-                            // std::sync::Mutex — must not hold across await points.
-                            let mut st = app_handle.state.lock().unwrap();
-                            st.mark_openai_connected(true);
-                            st.status.clone()
-                        }; // MutexGuard dropped here — safe to emit
-                        let _ = ev_app.emit("status-changed", status_clone);
-                    }
+            // Task 8: segment accumulation buffers (task-local, reset after each flush).
+            let mut src_seg = String::new();
+            let mut tgt_seg = String::new();
+            // Task 8: silence-gap fallback timers.
+            let mut last_src_delta: Option<std::time::Instant> = None;
+            let mut last_tgt_delta: Option<std::time::Instant> = None;
+            // Task 8: silence-gap interval — fires every 500 ms to check for stale segs.
+            let mut silence_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+            // Consume the first immediate tick so the loop doesn't flush on entry.
+            silence_tick.tick().await;
 
-                    TranslationEvent::OutputAudioDelta {
-                        pcm16,
-                        sample_rate,
-                        channels,
-                        ..
-                    } => {
-                        // Task 4.4: measure first-audio latency on the first delta
-                        // of this session.  `last_send_time` is set by the graph
-                        // loop on each successful uplink try_send.
-                        if !first_audio_measured {
-                            let elapsed = {
-                                let guard = ev_last_send.lock();
-                                guard.as_ref().map(|t| t.elapsed())
-                            };
-                            if let Some(dur) = elapsed {
-                                let ms = dur.as_millis() as u32;
-                                ev_first_audio_ms.store(ms, Ordering::Relaxed);
+            // Task 8: inline flush helper — synchronous fs I/O (best-effort).
+            // Does NOT hold any engine MutexGuard; session_log_task has its own
+            // internal Mutex which is always acquired and released within append().
+            macro_rules! flush_seg {
+                ($seg:expr, $kind:expr, $lang:expr) => {
+                    if !$seg.trim().is_empty() {
+                        let save = crate::appcfg::load_or_default().privacy.save_transcript_history;
+                        if save {
+                            session_log_task.append(&crate::transcript_log::TranscriptRecord {
+                                ts: crate::commands::rfc3339_now(),
+                                kind: $kind.to_string(),
+                                lang: $lang.clone(),
+                                text: std::mem::take(&mut $seg).trim().to_string(),
+                            });
+                        } else {
+                            $seg.clear();
+                        }
+                    }
+                };
+            }
+
+            loop {
+                tokio::select! {
+                    maybe_ev = ev_rx.recv() => {
+                        let Some(ev) = maybe_ev else { break };
+                        match ev {
+                            TranslationEvent::SessionUpdated => {
+                                // Task 4.4: session is confirmed live by the server.
+                                // Mark openai_connected=true in AppStatus and emit
+                                // "status-changed" — mirrors the lib.rs 5 s-interval
+                                // lock/clone/emit discipline (MutexGuard dropped before emit).
+                                use tauri::Manager as _;
+                                let status_clone = {
+                                    let app_handle = ev_app.state::<crate::commands::AppHandle>();
+                                    // std::sync::Mutex — must not hold across await points.
+                                    let mut st = app_handle.state.lock().unwrap();
+                                    st.mark_openai_connected(true);
+                                    st.status.clone()
+                                }; // MutexGuard dropped here — safe to emit
+                                let _ = ev_app.emit("status-changed", status_clone);
+                                // Task 9: record connected (after MutexGuard dropped).
+                                conn_log_task.push("connected", "session established");
                             }
-                            // Mark that at least one delta arrived — gate for
-                            // latency emit (should_emit_latency).
-                            ev_audio_flowing.store(true, Ordering::Relaxed);
-                            first_audio_measured = true;
-                        }
 
-                        // If the server changes sample rate (unusual but possible),
-                        // recreate the resampler so we resample correctly.
-                        if sample_rate != current_in_hz {
-                            resampler = intervox_core::audio::resampler::LinearResampler::new(
+                            TranslationEvent::OutputAudioDelta {
+                                pcm16,
                                 sample_rate,
-                                48_000,
-                            );
-                            current_in_hz = sample_rate;
+                                channels,
+                                ..
+                            } => {
+                                // Task 4.4: measure first-audio latency on the first delta
+                                // of this session.  `last_send_time` is set by the graph
+                                // loop on each successful uplink try_send.
+                                if !first_audio_measured {
+                                    let elapsed = {
+                                        let guard = ev_last_send.lock();
+                                        guard.as_ref().map(|t| t.elapsed())
+                                    };
+                                    if let Some(dur) = elapsed {
+                                        let ms = dur.as_millis() as u32;
+                                        ev_first_audio_ms.store(ms, Ordering::Relaxed);
+                                    }
+                                    // Mark that at least one delta arrived — gate for
+                                    // latency emit (should_emit_latency).
+                                    ev_audio_flowing.store(true, Ordering::Relaxed);
+                                    first_audio_measured = true;
+                                }
+
+                                // If the server changes sample rate (unusual but possible),
+                                // recreate the resampler so we resample correctly.
+                                if sample_rate != current_in_hz {
+                                    resampler = intervox_core::audio::resampler::LinearResampler::new(
+                                        sample_rate,
+                                        48_000,
+                                    );
+                                    current_in_hz = sample_rate;
+                                }
+                                let mut jb = jitter_push.lock();
+                                translate_chain::ingest_audio_delta(
+                                    &pcm16,
+                                    channels,
+                                    &mut resampler,
+                                    &mut jb,
+                                );
+                            }
+
+                            TranslationEvent::OutputTranscriptDelta { text, .. } => {
+                                // Emit { text } to match the frontend's
+                                // `listen<{ text: string }>("target-transcript-delta", ...)`.
+                                let _ = ev_app.emit(
+                                    "target-transcript-delta",
+                                    serde_json::json!({ "text": text }),
+                                );
+                                // Task 8: accumulate into tgt_seg for persistence.
+                                tgt_seg.push_str(&text);
+                                last_tgt_delta = Some(std::time::Instant::now());
+                            }
+
+                            TranslationEvent::InputTranscriptDelta { text, .. } => {
+                                // Emit { text } to match the frontend's
+                                // `listen<{ text: string }>("source-transcript-delta", ...)`.
+                                let _ = ev_app.emit(
+                                    "source-transcript-delta",
+                                    serde_json::json!({ "text": text }),
+                                );
+                                // Task 8: accumulate into src_seg for persistence.
+                                src_seg.push_str(&text);
+                                last_src_delta = Some(std::time::Instant::now());
+                            }
+
+                            TranslationEvent::Error { code, message } => {
+                                // Determine if this is a fatal auth error before acquiring any lock.
+                                let fatal = matches!(code.as_deref(), Some("AUTH"))
+                                    || message.to_lowercase().contains("invalid api key")
+                                    || message.to_lowercase().contains("invalid_api_key");
+
+                                // Task 9: record error (before acquiring any lock).
+                                conn_log_task.push("error", format!("{:?}: {}", code, message));
+
+                                // Surface to the UI; reconnect is handled inside realtime::run.
+                                let _ = ev_app
+                                    .emit("error", intervox_core::AppError::network_error(message.clone()));
+
+                                if fatal {
+                                    use tauri::Manager as _;
+                                    let status_clone = {
+                                        let app_handle = ev_app.state::<crate::commands::AppHandle>();
+                                        let mut st = app_handle.state.lock().unwrap();
+                                        // mark_openai_connected(false) clears openai_connected and updates phase
+                                        // (→ ConnectingTranslation) + translation (→ Reconnecting); then override
+                                        // translation to Failed since the supervisor will NOT retry an auth failure.
+                                        st.mark_openai_connected(false);
+                                        st.set_translation_conn(
+                                            intervox_core::state::TranslationConn::Failed,
+                                        );
+                                        st.status.clone()
+                                    }; // MutexGuard dropped here
+                                    let _ = ev_app.emit("status-changed", status_clone);
+                                    // Task 9: fatal → also record "failed" (after MutexGuard dropped).
+                                    conn_log_task.push("failed", message.clone());
+                                } else {
+                                    use tauri::Manager as _;
+                                    let status_clone = {
+                                        let app_handle = ev_app.state::<crate::commands::AppHandle>();
+                                        let mut st = app_handle.state.lock().unwrap();
+                                        st.mark_openai_connected(false);
+                                        st.status.clone()
+                                    }; // MutexGuard dropped here
+                                    let _ = ev_app.emit("status-changed", status_clone);
+                                    // Task 9: non-fatal → record "reconnecting" (after MutexGuard dropped).
+                                    conn_log_task.push("reconnecting", "");
+                                }
+                            }
+
+                            TranslationEvent::Closed => {
+                                // Task 8: flush both non-empty segments before marking closed.
+                                flush_seg!(src_seg, "source", "auto".to_string());
+                                flush_seg!(tgt_seg, "target", ev_tgt_lang);
+                                last_src_delta = None;
+                                last_tgt_delta = None;
+
+                                // Task 4.4: transport closed (network drop / server reset).
+                                // Mark openai_connected=false — mirrors stop path.
+                                // realtime::run handles reconnect; we just update the UI.
+                                use tauri::Manager as _;
+                                let status_clone = {
+                                    let app_handle = ev_app.state::<crate::commands::AppHandle>();
+                                    let mut st = app_handle.state.lock().unwrap();
+                                    st.mark_openai_connected(false);
+                                    st.status.clone()
+                                }; // MutexGuard dropped here
+                                let _ = ev_app.emit("status-changed", status_clone);
+                                // Task 9: record closed (after MutexGuard dropped).
+                                conn_log_task.push("closed", "session ended");
+                            }
+
+                            TranslationEvent::InputTranscriptDone => {
+                                // Task 8: sentence-boundary marker for source — flush src_seg.
+                                flush_seg!(src_seg, "source", "auto".to_string());
+                                last_src_delta = None;
+                            }
+
+                            TranslationEvent::OutputTranscriptDone => {
+                                // Task 8: sentence-boundary marker for target — flush tgt_seg.
+                                flush_seg!(tgt_seg, "target", ev_tgt_lang);
+                                last_tgt_delta = None;
+                            }
+
+                            TranslationEvent::Ignored(_) => {
+                                // Unknown event type — silently ignore.
+                            }
                         }
-                        let mut jb = jitter_push.lock();
-                        translate_chain::ingest_audio_delta(
-                            &pcm16,
-                            channels,
-                            &mut resampler,
-                            &mut jb,
-                        );
                     }
 
-                    TranslationEvent::OutputTranscriptDelta { text, .. } => {
-                        // Emit { text } to match the frontend's
-                        // `listen<{ text: string }>("target-transcript-delta", ...)`.
-                        let _ = ev_app.emit(
-                            "target-transcript-delta",
-                            serde_json::json!({ "text": text }),
-                        );
-                    }
-
-                    TranslationEvent::InputTranscriptDelta { text, .. } => {
-                        // Emit { text } to match the frontend's
-                        // `listen<{ text: string }>("source-transcript-delta", ...)`.
-                        let _ = ev_app.emit(
-                            "source-transcript-delta",
-                            serde_json::json!({ "text": text }),
-                        );
-                    }
-
-                    TranslationEvent::Error { message, .. } => {
-                        // Surface to the UI; reconnect is handled inside realtime::run.
-                        let _ = ev_app.emit(
-                            "error",
-                            intervox_core::AppError::network_error(message),
-                        );
-                    }
-
-                    TranslationEvent::Closed => {
-                        // Task 4.4: transport closed (network drop / server reset).
-                        // Mark openai_connected=false — mirrors stop path.
-                        // realtime::run handles reconnect; we just update the UI.
-                        use tauri::Manager as _;
-                        let status_clone = {
-                            let app_handle =
-                                ev_app.state::<crate::commands::AppHandle>();
-                            let mut st = app_handle.state.lock().unwrap();
-                            st.mark_openai_connected(false);
-                            st.status.clone()
-                        }; // MutexGuard dropped here
-                        let _ = ev_app.emit("status-changed", status_clone);
-                    }
-
-                    TranslationEvent::Ignored(_) => {
-                        // Unknown event type — silently ignore.
+                    // Task 8: silence-gap fallback finalization.
+                    // Fires every 500 ms; if a segment has been accumulating for
+                    // >= 1500 ms with no new delta, flush it now so segments
+                    // persist even when the endpoint never sends *_transcript.done.
+                    _ = silence_tick.tick() => {
+                        let now = std::time::Instant::now();
+                        if let Some(t) = last_src_delta {
+                            if now.duration_since(t).as_millis() >= 1500 && !src_seg.trim().is_empty() {
+                                flush_seg!(src_seg, "source", "auto".to_string());
+                                last_src_delta = None;
+                            }
+                        }
+                        if let Some(t) = last_tgt_delta {
+                            if now.duration_since(t).as_millis() >= 1500 && !tgt_seg.trim().is_empty() {
+                                flush_seg!(tgt_seg, "target", ev_tgt_lang);
+                                last_tgt_delta = None;
+                            }
+                        }
                     }
                 }
             }
@@ -597,6 +926,11 @@ impl Engine {
         let pull_app = self.app.clone();
         let pull_audio_flowing = Arc::clone(&self.audio_flowing);
         let pull_first_audio_ms = Arc::clone(&first_audio_ms);
+        // Task 9: clone conn_log for latency throttle inside pull_task.
+        let pull_conn_log = std::sync::Arc::clone(&self.conn_log);
+        // FIX-3: lock-free badge + mode reads — no disk I/O in the hot pull loop.
+        let pull_show_badge = Arc::clone(&self.show_latency_badge);
+        let pull_mode_atomic = Arc::clone(&self.mode_atomic);
         let pull_task = tauri::async_runtime::spawn(async move {
             // Build the DelayLine only if we're mixing original (Task 4.3).
             let mut delay_line: Option<intervox_core::audio::delay_line::DelayLine> =
@@ -614,6 +948,8 @@ impl Engine {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
             // Task 4.4: tick counter for ~1 Hz latency emit (every 100 ticks = 1 s).
             let mut tick_count: u32 = 0;
+            // Task 9: latency throttle — only push "latency" when value differs > 100 ms.
+            let mut last_logged_latency: Option<u32> = None;
             loop {
                 tick.tick().await;
                 tick_count = tick_count.wrapping_add(1);
@@ -657,7 +993,8 @@ impl Engine {
                 };
 
                 // Write final block to ring (feeds the virtual mic driver at 48 kHz).
-                ring_arc.write(&final_block);
+                // This is a live path, so stale unread backlog is bounded.
+                ring_arc.write_live(&final_block);
                 // Update out_level from the FINAL block (mixed or limited).
                 let bits = translate_chain::rms_bits(&final_block);
                 out_level_arc.store(bits, Ordering::Relaxed);
@@ -670,24 +1007,20 @@ impl Engine {
                 if tick_count.is_multiple_of(100) {
                     let flowing = pull_audio_flowing.load(Ordering::Relaxed);
                     if translate_chain::should_emit_latency(
-                        /*openai_connected=*/ flowing,
-                        /*audio_flowing=*/ flowing,
+                        /*openai_connected=*/ flowing, /*audio_flowing=*/ flowing,
                     ) {
                         // virtual_mic_output_lag_ms: ring backlog in ms.
                         // ring_arc.backlog_ms() acquires the parking_lot::Mutex
                         // briefly (sub-microsecond: one atomic read).
                         let ring_backlog_ms = ring_arc.backlog_ms();
 
-                        let mut metrics =
-                            intervox_core::diagnostics::metrics::LatencyMetrics {
-                                capture_to_send_ms:
-                                    translate_chain::CAPTURE_TO_SEND_EST_MS,
-                                openai_first_audio_ms: pull_first_audio_ms
-                                    .load(Ordering::Relaxed),
-                                jitter_buffer_ms: jitter_ms,
-                                virtual_mic_output_lag_ms: ring_backlog_ms,
-                                total_estimated_latency_ms: 0,
-                            };
+                        let mut metrics = intervox_core::diagnostics::metrics::LatencyMetrics {
+                            capture_to_send_ms: translate_chain::CAPTURE_TO_SEND_EST_MS,
+                            openai_first_audio_ms: pull_first_audio_ms.load(Ordering::Relaxed),
+                            jitter_buffer_ms: jitter_ms,
+                            virtual_mic_output_lag_ms: ring_backlog_ms,
+                            total_estimated_latency_ms: 0,
+                        };
                         let total = metrics.recompute_total();
                         // Frontend listens as `listen<number>("latency-changed", ...)`
                         // — emit bare u32 (confirmed from src/lib/tauri.ts).
@@ -696,11 +1029,38 @@ impl Engine {
                         // returns the current value without waiting for the next tick.
                         {
                             use tauri::Manager as _;
-                            let app_handle =
-                                pull_app.state::<crate::commands::AppHandle>();
+                            let app_handle = pull_app.state::<crate::commands::AppHandle>();
                             let mut st = app_handle.state.lock().unwrap();
                             st.status.latency_ms = Some(total);
                         } // MutexGuard dropped here — never held across await
+                        // Task 9: push "latency" only when value changed materially (> 100 ms).
+                        // This avoids log spam at ~1 Hz while still capturing meaningful shifts.
+                        let should_log = match last_logged_latency {
+                            None => true,
+                            Some(prev) => total.abs_diff(prev) > 100,
+                        };
+                        if should_log {
+                            pull_conn_log.push("latency", format!("{total} ms"));
+                            last_logged_latency = Some(total);
+                        }
+
+                        // Best-effort: refresh tray latency badge if enabled.
+                        // FIX-3: no disk read, no AppHandle state lock — use atomics.
+                        if pull_show_badge.load(std::sync::atomic::Ordering::Relaxed) {
+                            use tauri::Manager as _;
+                            if let Some(tray_state) =
+                                pull_app.try_state::<crate::commands::TrayState>()
+                            {
+                                let mode = ring::mode_from_u32(
+                                    pull_mode_atomic.load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                let label = crate::commands::tray_mode_label(mode);
+                                let title = crate::platform_integration::tray_title(
+                                    label, true, Some(total),
+                                );
+                                let _ = tray_state.tray.set_title(Some(title.as_str()));
+                            }
+                        }
                     }
                 }
             }
@@ -734,6 +1094,11 @@ impl Engine {
         if let Some(t) = g.pull_task.take() {
             t.abort();
         }
+        // Task 8: close the session log after tasks are aborted.
+        // The ev_task flushes segments on Closed events and the silence-gap
+        // timer; here we just close the file handle so no stale path carries
+        // into the next session.  Best-effort flush happened inside the task.
+        self.session_log.end();
         // Clear the uplink slot — graph loop will see None and drop frames.
         *self.uplink_slot.lock() = None;
         // Clear the original-queue slot and drain stale samples so no original
@@ -772,6 +1137,8 @@ impl Engine {
             st.status.clone()
         }; // MutexGuard dropped here
         let _ = self.app.emit("status-changed", status_clone);
+        // Task 9: record stop-path closed (after MutexGuard dropped and emit done).
+        self.conn_log.push("closed", "session ended");
     }
 
     /// Start CPAL capture and the associated level-emit + graph tasks.
@@ -791,8 +1158,7 @@ impl Engine {
                 let out_level_arc = Arc::clone(&self.out_level);
                 let level_app = self.app.clone();
                 let level_task = tauri::async_runtime::spawn(async move {
-                    let mut tick =
-                        tokio::time::interval(std::time::Duration::from_millis(50));
+                    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
                     loop {
                         tick.tick().await;
                         let in_rms = f32::from_bits(level_arc.load(Ordering::Relaxed));
@@ -828,31 +1194,32 @@ impl Engine {
                         // phase state carries across chunk boundaries (streaming-safe).
                         let mut resampler =
                             intervox_core::audio::resampler::LinearResampler::new(48_000, 24_000);
+                        let mut uplink_chunker = graph::OpenAiChunker::new();
 
                         while let Ok(frame) = rx.recv() {
-                            let mode =
-                                mode_from_u32(mode_atomic.load(Ordering::Relaxed));
+                            let mode = mode_from_u32(mode_atomic.load(Ordering::Relaxed));
                             // Read the current original-queue slot under the lock
                             // (sub-microsecond: just clone the Arc option).
                             let oq = original_queue_slot.lock().clone();
-                            graph::route_frame(
+                            let sent_to_openai = graph::route_frame(
                                 mode,
                                 &frame,
-                                &ring_arc,
-                                &out_level_arc,
-                                &uplink_slot,
-                                &mut resampler,
-                                oq.as_ref(),
+                                graph::RouteFrameContext {
+                                    ring: &ring_arc,
+                                    out_level: &out_level_arc,
+                                    uplink_slot: &uplink_slot,
+                                    resampler: &mut resampler,
+                                    uplink_chunker: &mut uplink_chunker,
+                                    original_queue: oq.as_ref(),
+                                },
                             );
-                            // Task 4.4: if the mode needs OpenAI uplink, stamp the
-                            // last-send time so ev_task can compute first-audio
-                            // latency.  We stamp on every translate frame — the
-                            // most recent stamp before the first OutputAudioDelta
-                            // arrives gives the best "send → first response" delta.
+                            // Task 4.4: stamp only after a fixed 40 ms OpenAI
+                            // chunk is successfully enqueued to the realtime
+                            // transport. Stamping every capture frame would
+                            // undercount the batching delay.
                             // Lock time: sub-microsecond (just store an Instant).
-                            if intervox_core::FrameRouting::for_mode(mode).mic_to_openai {
-                                *graph_last_send.lock() =
-                                    Some(std::time::Instant::now());
+                            if sent_to_openai {
+                                *graph_last_send.lock() = Some(std::time::Instant::now());
                             }
                         }
                     })
@@ -950,9 +1317,7 @@ impl Engine {
                     }
 
                     // Perform the restart via the engine's state.
-                    if let Some(engine) =
-                        watcher_app.try_state::<std::sync::Arc<Engine>>()
-                    {
+                    if let Some(engine) = watcher_app.try_state::<std::sync::Arc<Engine>>() {
                         let mut g = engine.inner.lock();
                         // Only restart if capture is not already running
                         // (a manual restart via set_mode may have beaten us).
@@ -969,6 +1334,46 @@ impl Engine {
                 let _ = app.emit("error", e);
             }
         }
+    }
+
+    /// Start a CPAL input stream that updates the shared input RMS level only.
+    /// The returned audio receiver is dropped immediately, so no audio can flow
+    /// to the ring or network from this path; the capture callback still updates
+    /// `self.level` before its non-blocking send attempt.
+    fn start_level_probe_locked(&self, g: &mut Inner) -> Result<(), AppError> {
+        if g.capture.is_some() || g.probe_capture.is_some() {
+            return Ok(());
+        }
+
+        let device_id = g.source_device_id.as_deref().map(str::to_owned);
+        let level = Arc::clone(&self.level);
+        let app = self.app.clone();
+        let (handle, rx) = capture::start(device_id.as_deref(), level, app)?;
+        drop(rx);
+        g.probe_capture = Some(handle);
+
+        let level_arc = Arc::clone(&self.level);
+        let level_app = self.app.clone();
+        let level_task = tauri::async_runtime::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                tick.tick().await;
+                let in_rms = f32::from_bits(level_arc.load(Ordering::Relaxed));
+                let _ = level_app.emit("input-level", in_rms);
+                let _ = level_app.emit("output-level", 0.0f32);
+            }
+        });
+        g.probe_level_task = Some(level_task);
+        Ok(())
+    }
+
+    fn stop_level_probe_locked(&self, g: &mut Inner) {
+        if let Some(t) = g.probe_level_task.take() {
+            t.abort();
+        }
+        g.probe_capture.take();
+        self.level.store(0, Ordering::Relaxed);
+        let _ = self.app.emit("input-level", 0.0f32);
     }
 
     /// Stop CPAL capture, the level-emit task, and the graph task.

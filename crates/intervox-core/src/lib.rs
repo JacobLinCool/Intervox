@@ -6,21 +6,22 @@
 //! harness so it can be validated before the UI / driver / network layers
 //! are wired in.
 
+pub mod config;
+pub mod engine_graph;
 pub mod errors;
+pub mod pipeline;
 pub mod redact;
 pub mod state;
-pub mod config;
-pub mod pipeline;
-pub mod engine_graph;
+pub mod usage;
 
 pub mod audio {
+    pub mod delay_line;
+    pub mod jitter_buffer;
+    pub mod level_meter;
+    pub mod mixer;
     pub mod pcm;
     pub mod resampler;
-    pub mod mixer;
-    pub mod level_meter;
     pub mod vad;
-    pub mod jitter_buffer;
-    pub mod delay_line;
 }
 
 pub mod realtime {

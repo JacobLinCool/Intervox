@@ -92,7 +92,10 @@ mod tests {
         v.push(&loud(160));
         assert!(v.is_speaking());
         for _ in 0..4 {
-            assert!(v.push(&quiet(160)), "should still be speaking during hangover");
+            assert!(
+                v.push(&quiet(160)),
+                "should still be speaking during hangover"
+            );
         }
         assert!(!v.push(&quiet(160)), "should stop after hangover expires");
     }

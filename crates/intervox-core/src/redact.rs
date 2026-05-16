@@ -21,7 +21,14 @@ pub fn redact_secret(s: &str) -> String {
         MASK.to_string()
     } else {
         // Collect the last 4 chars safely (no byte-boundary panic on multibyte input).
-        let suffix: String = s.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        let suffix: String = s
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("{MASK}{suffix}")
     }
 }
@@ -80,7 +87,10 @@ mod tests {
         );
 
         // The mask prefix must be present.
-        assert!(result.starts_with("****"), "must start with '****', got: {result}");
+        assert!(
+            result.starts_with("****"),
+            "must start with '****', got: {result}"
+        );
 
         // At most 4 non-mask characters (the trailing suffix).
         let non_mask = result.trim_start_matches('*');
@@ -117,7 +127,10 @@ mod tests {
         // Must not panic.
         let result = redact_secret(s);
         // Must start with the mask.
-        assert!(result.starts_with("****"), "must start with '****', got: {result}");
+        assert!(
+            result.starts_with("****"),
+            "must start with '****', got: {result}"
+        );
         // The non-mask suffix must be at most 4 Unicode scalars.
         let suffix: &str = result.trim_start_matches('*');
         let suffix_char_count = suffix.chars().count();
@@ -126,8 +139,17 @@ mod tests {
             "exposed {suffix_char_count} chars (> 4): {suffix:?}"
         );
         // The suffix must match the last 4 chars of the original string.
-        let expected_suffix: String =
-            s.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
-        assert_eq!(suffix, expected_suffix, "suffix must be last 4 chars of input");
+        let expected_suffix: String = s
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert_eq!(
+            suffix, expected_suffix,
+            "suffix must be last 4 chars of input"
+        );
     }
 }

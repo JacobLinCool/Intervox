@@ -17,9 +17,10 @@
 //! The callback NEVER blocks: `try_send` drops the frame on full/disconnected.
 //! No unbounded allocation beyond the unavoidable resampled `Vec`.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::FromSample;
@@ -28,6 +29,7 @@ use cpal::SizedSample;
 use intervox_core::audio::level_meter::LevelMeter;
 use intervox_core::audio::resampler::LinearResampler;
 use intervox_core::AppError;
+use serde::Serialize;
 use tauri::Emitter;
 
 /// Target sample rate for the engine (virtual mic + OpenAI path).
@@ -35,6 +37,7 @@ const TARGET_HZ: u32 = 48_000;
 
 /// Capacity of the bounded inter-thread channel.
 const SINK_BOUND: usize = 64;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 // ── CaptureHandle ─────────────────────────────────────────────────────────────
 
@@ -90,25 +93,50 @@ pub fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
 /// Resolve a cpal input device from a frontend `device_id`.
 ///
 /// Frontend IDs have the form `"coreaudio:<name>"`.  Strip the prefix and
-/// search by `device.name()`.  Falls back to the system default on `None` or
-/// no match.
-fn resolve_input_device(device_id: Option<&str>) -> Option<cpal::Device> {
+/// search by `device.name()`. Use `host.devices()` instead of
+/// `host.input_devices()` so resolving a selected mic does not ask every
+/// device for supported stream configs before opening the one stream we need.
+/// Uses the system default only when no explicit `device_id` is provided.
+/// An explicit but missing device is a hard error so the UI cannot claim it is
+/// listening to one microphone while CPAL silently captures another.
+fn resolve_input_device(device_id: Option<&str>) -> Result<cpal::Device, AppError> {
     let host = cpal::default_host();
 
     if let Some(id) = device_id {
         let target_name = id.strip_prefix("coreaudio:").unwrap_or(id);
-        if let Ok(devices) = host.input_devices() {
-            for dev in devices {
-                if let Ok(name) = dev.name() {
-                    if name == target_name {
-                        return Some(dev);
+        let devices = host
+            .devices()
+            .map_err(|e| AppError::internal(format!("enumerate CoreAudio devices: {e}")))?;
+        let mut matched_non_input = false;
+
+        for dev in devices {
+            if let Ok(name) = dev.name() {
+                if name == target_name {
+                    if dev.default_input_config().is_ok() {
+                        return Ok(dev);
                     }
+                    matched_non_input = true;
                 }
             }
         }
+
+        if matched_non_input {
+            return Err(AppError::audio_device_unavailable(format!(
+                "The selected device '{target_name}' exists but does not expose an input stream."
+            )));
+        }
+
+        return Err(AppError::audio_device_unavailable(format!(
+            "The selected microphone '{target_name}' is not visible to CoreAudio."
+        )));
     }
 
     host.default_input_device()
+        .ok_or_else(AppError::audio_device_lost)
+}
+
+fn resolved_device_name(device: &cpal::Device) -> String {
+    device.name().unwrap_or_else(|_| "<unknown>".into())
 }
 
 // ── Stream builder (generic over sample format) ───────────────────────────────
@@ -169,6 +197,80 @@ where
     Ok(stream)
 }
 
+fn update_max_rms(max_rms: &AtomicU32, value: f32) {
+    let value = value.clamp(0.0, 1.0);
+    let mut current = max_rms.load(Ordering::Relaxed);
+    loop {
+        let current_value = f32::from_bits(current);
+        if value <= current_value {
+            return;
+        }
+        match max_rms.compare_exchange_weak(
+            current,
+            value.to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn build_probe_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    max_rms: Arc<AtomicU32>,
+    callback_count: Arc<AtomicU64>,
+    captured_frames: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<String>>>,
+) -> Result<cpal::Stream, AppError>
+where
+    T: SizedSample + Send + 'static,
+    f32: FromSample<T>,
+{
+    let channels = config.channels;
+    let in_hz = config.sample_rate.0;
+    let mut resampler = LinearResampler::new(in_hz, TARGET_HZ);
+
+    device
+        .build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                callback_count.fetch_add(1, Ordering::Relaxed);
+
+                let f32_samples: Vec<f32> =
+                    data.iter().copied().map(|s| f32::from_sample(s)).collect();
+                let mono = downmix_to_mono(&f32_samples, channels);
+                captured_frames.fetch_add(mono.len() as u64, Ordering::Relaxed);
+
+                let resampled = resampler.process(&mono);
+                let level = LevelMeter::measure(&resampled);
+                update_max_rms(&max_rms, level.rms);
+            },
+            move |err| {
+                *last_error.lock().unwrap() = Some(err.to_string());
+            },
+            None,
+        )
+        .map_err(|e| AppError::internal(format!("cpal build_input_stream: {e}")))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureProbeReport {
+    pub requested_device_id: Option<String>,
+    pub resolved_device_name: String,
+    pub sample_format: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub callback_count: u64,
+    pub captured_frames: u64,
+    pub max_rms: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_error: Option<String>,
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Start microphone capture on a dedicated owning thread.
@@ -183,15 +285,8 @@ pub fn start(
     device_id: Option<&str>,
     level: Arc<AtomicU32>,
     app: tauri::AppHandle,
-) -> Result<
-    (
-        CaptureHandle,
-        std::sync::mpsc::Receiver<Vec<f32>>,
-    ),
-    AppError,
-> {
-    let device = resolve_input_device(device_id)
-        .ok_or_else(AppError::audio_device_lost)?;
+) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<Vec<f32>>), AppError> {
+    let device = resolve_input_device(device_id)?;
 
     let supported_config = device
         .default_input_config()
@@ -201,6 +296,7 @@ pub fn start(
     let sample_format = supported_config.sample_format();
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(SINK_BOUND);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), AppError>>(1);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
@@ -210,29 +306,40 @@ pub fn start(
         .spawn(move || {
             // Build the stream inside this thread — cpal::Stream stays here.
             let stream_result = match sample_format {
-                cpal::SampleFormat::F32 => build_stream::<f32>(
-                    &device,
-                    &stream_config,
-                    tx,
-                    level,
-                    app,
-                ),
-                cpal::SampleFormat::I16 => build_stream::<i16>(
-                    &device,
-                    &stream_config,
-                    tx,
-                    level,
-                    app,
-                ),
-                cpal::SampleFormat::U16 => build_stream::<u16>(
-                    &device,
-                    &stream_config,
-                    tx,
-                    level,
-                    app,
-                ),
+                cpal::SampleFormat::I8 => {
+                    build_stream::<i8>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::F32 => {
+                    build_stream::<f32>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::I16 => {
+                    build_stream::<i16>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::I32 => {
+                    build_stream::<i32>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::I64 => {
+                    build_stream::<i64>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::U8 => {
+                    build_stream::<u8>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::U16 => {
+                    build_stream::<u16>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::U32 => {
+                    build_stream::<u32>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::U64 => {
+                    build_stream::<u64>(&device, &stream_config, tx, level, app)
+                }
+                cpal::SampleFormat::F64 => {
+                    build_stream::<f64>(&device, &stream_config, tx, level, app)
+                }
                 other => {
-                    eprintln!("[capture] unsupported sample format: {other:?}");
+                    let err =
+                        AppError::internal(format!("unsupported input sample format: {other:?}"));
+                    let _ = ready_tx.send(Err(err));
                     return;
                 }
             };
@@ -240,15 +347,16 @@ pub fn start(
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[capture] failed to build stream: {e}");
+                    let _ = ready_tx.send(Err(e));
                     return;
                 }
             };
 
             if let Err(e) = stream.play() {
-                eprintln!("[capture] stream.play() failed: {e}");
+                let _ = ready_tx.send(Err(AppError::internal(format!("cpal stream.play: {e}"))));
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
 
             // Park this thread until the stop flag is set.
             while !stop_thread.load(Ordering::Acquire) {
@@ -259,7 +367,159 @@ pub fn start(
         })
         .map_err(|e| AppError::internal(format!("spawn capture thread: {e}")))?;
 
-    Ok((CaptureHandle { stop, thread: Some(thread) }, rx))
+    match ready_rx.recv_timeout(STARTUP_TIMEOUT) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            return Err(e);
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            stop.store(true, Ordering::Release);
+            thread.thread().unpark();
+            return Err(AppError::internal(format!(
+                "capture startup timed out after {}s",
+                STARTUP_TIMEOUT.as_secs()
+            )));
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = thread.join();
+            return Err(AppError::internal("capture thread exited before startup"));
+        }
+    }
+
+    Ok((
+        CaptureHandle {
+            stop,
+            thread: Some(thread),
+        },
+        rx,
+    ))
+}
+
+/// Open the selected input device for a bounded duration and report whether
+/// CoreAudio delivered real input callbacks. Used by the packaged-app CLI probe
+/// and manual acceptance when the UI meter is suspected of lying.
+pub fn probe_level(
+    device_id: Option<&str>,
+    duration: Duration,
+) -> Result<CaptureProbeReport, AppError> {
+    let device = resolve_input_device(device_id)?;
+    let resolved_name = resolved_device_name(&device);
+    let supported_config = device
+        .default_input_config()
+        .map_err(|e| AppError::internal(format!("default_input_config: {e}")))?;
+    let stream_config: cpal::StreamConfig = supported_config.config();
+    let sample_format = supported_config.sample_format();
+
+    let max_rms = Arc::new(AtomicU32::new(0));
+    let callback_count = Arc::new(AtomicU64::new(0));
+    let captured_frames = Arc::new(AtomicU64::new(0));
+    let last_error = Arc::new(Mutex::new(None));
+
+    let stream_result = match sample_format {
+        cpal::SampleFormat::I8 => build_probe_stream::<i8>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::F32 => build_probe_stream::<f32>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::I16 => build_probe_stream::<i16>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::I32 => build_probe_stream::<i32>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::I64 => build_probe_stream::<i64>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::U8 => build_probe_stream::<u8>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::U16 => build_probe_stream::<u16>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::U32 => build_probe_stream::<u32>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::U64 => build_probe_stream::<u64>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        cpal::SampleFormat::F64 => build_probe_stream::<f64>(
+            &device,
+            &stream_config,
+            Arc::clone(&max_rms),
+            Arc::clone(&callback_count),
+            Arc::clone(&captured_frames),
+            Arc::clone(&last_error),
+        ),
+        other => Err(AppError::internal(format!(
+            "unsupported input sample format: {other:?}"
+        ))),
+    }?;
+
+    stream_result
+        .play()
+        .map_err(|e| AppError::internal(format!("cpal stream.play: {e}")))?;
+    std::thread::sleep(duration);
+    drop(stream_result);
+    let stream_error = last_error.lock().unwrap().clone();
+
+    Ok(CaptureProbeReport {
+        requested_device_id: device_id.map(str::to_owned),
+        resolved_device_name: resolved_name,
+        sample_format: sample_format.to_string(),
+        sample_rate: stream_config.sample_rate.0,
+        channels: stream_config.channels,
+        callback_count: callback_count.load(Ordering::Relaxed),
+        captured_frames: captured_frames.load(Ordering::Relaxed),
+        max_rms: f32::from_bits(max_rms.load(Ordering::Relaxed)),
+        stream_error,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -285,10 +545,7 @@ mod tests {
         let out = downmix_to_mono(&input, 2);
         assert_eq!(out.len(), 2, "stereo → mono halves frame count");
         for v in &out {
-            assert!(
-                (v - 0.5_f32).abs() < 1e-6,
-                "expected 0.5, got {v}"
-            );
+            assert!((v - 0.5_f32).abs() < 1e-6, "expected 0.5, got {v}");
         }
     }
 
@@ -313,6 +570,15 @@ mod tests {
                 "channels={channels}"
             );
         }
+    }
+
+    #[test]
+    fn update_max_rms_keeps_largest_value() {
+        let max = AtomicU32::new(0.2_f32.to_bits());
+        update_max_rms(&max, 0.1);
+        assert_eq!(f32::from_bits(max.load(Ordering::Relaxed)), 0.2);
+        update_max_rms(&max, 0.4);
+        assert_eq!(f32::from_bits(max.load(Ordering::Relaxed)), 0.4);
     }
 
     #[test]

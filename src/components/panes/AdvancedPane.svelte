@@ -2,13 +2,9 @@
   import { store } from "$lib/store.svelte";
   import { PaneTitle, FieldGroup, Row, RowLabel, Toggle } from "$lib/controls";
   import { css } from "$lib/util";
+  import ConnectionLogModal from "../ConnectionLogModal.svelte";
 
-  // UI-only: not persisted yet
-  let showLatencyBadge = $state(true);
-  // UI-only: not persisted yet
-  let launchAtLogin = $state(true);
-  // UI-only: not persisted yet
-  let hideDockIcon = $state(true);
+  let showLog = $state(false);
 </script>
 
 <PaneTitle
@@ -20,10 +16,9 @@
   <Row>
     <RowLabel title="Show latency badge in menu bar" />
     <span style={css({ marginLeft: "auto" })}>
-      <!-- UI-only: not persisted yet -->
       <Toggle
-        value={showLatencyBadge}
-        onChange={(v) => { showLatencyBadge = v; }}
+        value={store.config?.ui.show_latency_badge ?? false}
+        onChange={(v) => store.setUiConfig({ show_latency_badge: v })}
         tint="var(--c-mixed)"
       />
     </span>
@@ -31,14 +26,13 @@
   <Row>
     <RowLabel title="Connection log" />
     <span style={css({ marginLeft: "auto" })}>
-      <!-- UI-only: not persisted yet -->
-      <button class="btn" onclick={() => {}}>View log</button>
+      <button class="btn" onclick={() => (showLog = true)}>View log</button>
     </span>
   </Row>
   <Row last>
     <RowLabel
       title="Clear transcript history"
-      sub="Clears the current session transcript from the display. No transcript is saved to disk."
+      sub="Deletes saved transcript files on this Mac and clears the current session."
     />
     <span style={css({ marginLeft: "auto" })}>
       <button class="btn" onclick={() => store.clearHistory()}>Clear history</button>
@@ -50,10 +44,9 @@
   <Row>
     <RowLabel title="Launch at login" />
     <span style={css({ marginLeft: "auto" })}>
-      <!-- UI-only: not persisted yet -->
       <Toggle
-        value={launchAtLogin}
-        onChange={(v) => { launchAtLogin = v; }}
+        value={store.config?.ui.launch_at_login ?? false}
+        onChange={(v) => store.setUiConfig({ launch_at_login: v })}
         tint="var(--c-mixed)"
       />
     </span>
@@ -61,10 +54,9 @@
   <Row>
     <RowLabel title="Hide Dock icon" sub="Run as a menu bar app only." />
     <span style={css({ marginLeft: "auto" })}>
-      <!-- UI-only: not persisted yet -->
       <Toggle
-        value={hideDockIcon}
-        onChange={(v) => { hideDockIcon = v; }}
+        value={store.config?.ui.hide_dock_icon ?? false}
+        onChange={(v) => store.setUiConfig({ hide_dock_icon: v })}
         tint="var(--c-mixed)"
       />
     </span>
@@ -78,5 +70,7 @@
 </FieldGroup>
 
 <div style={css({ fontSize: 11.5, color: "var(--txt-3)", textAlign: "center", marginTop: 24 })}>
-  Intervox v1.0.0 (build 482)  ·  © 2026
+  Intervox {store.appVersion ? `v${store.appVersion} ` : ""}·  © 2026
 </div>
+
+{#if showLog}<ConnectionLogModal onClose={() => (showLog = false)} />{/if}

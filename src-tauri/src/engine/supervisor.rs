@@ -51,7 +51,7 @@ use std::sync::{
 
 use intervox_core::realtime::events::TranslationEvent;
 
-use super::realtime;
+use super::{realtime, translate_chain::OPENAI_UPLINK_QUEUE_BOUND};
 
 /// Gate: return `true` only when the supervisor should restart `realtime::run`.
 ///
@@ -90,7 +90,7 @@ pub fn should_restart(mode_needs_openai: bool, cancelled: bool) -> bool {
 /// the WS connection is torn down promptly.
 ///
 /// # Parameters
-/// - `key` / `src_lang` / `tgt_lang`: forwarded to `realtime::run`.
+/// - `key` / `tgt_lang`: forwarded to `realtime::run`.
 /// - `pcm_rx`: uplink receiver.  The supervisor moves it into the first call;
 ///   on restart it is recreated by the caller via `uplink_slot`.
 ///   **Note**: since we reuse channels (minimal design), this is the SAME
@@ -100,11 +100,11 @@ pub fn should_restart(mode_needs_openai: bool, cancelled: bool) -> bool {
 ///   false by `stop_openai_session_locked`.
 pub async fn run_supervised(
     key: String,
-    src_lang: String,
     tgt_lang: String,
     pcm_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
     ev_tx: tokio::sync::mpsc::Sender<TranslationEvent>,
     session_active: Arc<AtomicBool>,
+    uplink_samples: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
     // We need to pass pcm_rx into run() which takes ownership — but for the
     // minimal design we want to reuse the same receiver across restarts.
@@ -193,7 +193,8 @@ pub async fn run_supervised(
         }
 
         // Create a relay channel for this invocation.
-        let (relay_tx, relay_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(64);
+        let (relay_tx, relay_rx) =
+            tokio::sync::mpsc::channel::<Vec<i16>>(OPENAI_UPLINK_QUEUE_BOUND);
         let ev_tx_clone = ev_tx.clone();
 
         // Spawn the relay: forwards from real_pcm_rx into relay_tx.
@@ -219,10 +220,10 @@ pub async fn run_supervised(
         // Run the realtime transport (owns relay_rx for this invocation).
         realtime::run(
             key.clone(),
-            src_lang.clone(),
             tgt_lang.clone(),
             relay_rx,
             ev_tx_clone,
+            uplink_samples.clone(),
         )
         .await;
 

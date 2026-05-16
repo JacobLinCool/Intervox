@@ -6,19 +6,19 @@
   let {
     meta,
     selected,
-    onclick,
+    onSelect,
   }: {
     meta: { id: UiMode; label: string; color: string; short: string; body: string };
     selected: boolean;
-    onclick: () => void;
+    onSelect: () => void;
   } = $props();
 </script>
 
 <div
   role="button"
   tabindex="0"
-  {onclick}
-  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") onclick(); }}
+  onclick={onSelect}
+  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") onSelect(); }}
   style={css({
     cursor: "pointer",
     padding: 12,

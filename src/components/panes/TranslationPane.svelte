@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
-  import { SOURCE_LANGS, ALL_LANGS, COMMON_LANGS } from "$lib/constants";
+  import { ALL_LANGS, COMMON_LANGS } from "$lib/constants";
   import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown, Segmented, Slider } from "$lib/controls";
   import { LangChip, Check, SysIcon } from "$lib/icons";
   import { css } from "$lib/util";
@@ -37,14 +37,6 @@
 {/snippet}
 
 <FieldGroup title="Languages">
-  <Row>
-    <RowLabel title="Source language" sub="What you speak." />
-    <Pulldown
-      value={store.sourceLang.code}
-      options={SOURCE_LANGS.map((l) => ({ value: l.code, label: l.name }))}
-      onChange={(v) => store.setSourceLang(v)}
-    />
-  </Row>
   <Row last>
     <RowLabel title="Target language" sub="What the meeting hears." />
     <Pulldown

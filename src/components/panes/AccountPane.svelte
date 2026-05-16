@@ -48,7 +48,7 @@
 <FieldGroup
   title="OpenAI API Key"
   hint={verified
-    ? "Stored in your Mac's Keychain. Remove the key to stop translation."
+    ? "Stored in Intervox's local app config on this Mac. Remove the key to stop translation."
     : "Don't have a key? Create one at platform.openai.com → API keys."}
 >
   <Row extraStyle={{ padding: "14px", flexDirection: "column", alignItems: "stretch" }}>
@@ -170,17 +170,22 @@
   </Row>
 </FieldGroup>
 
-<!-- Usage (only when verified) -->
 {#if verified}
-  <FieldGroup title="Usage" hint="Live numbers from your OpenAI usage endpoint. Updates every few minutes.">
+  <FieldGroup title="Usage" hint="Estimated locally from translation audio sent from this Mac (~$0.034/min). This is an estimate, not your OpenAI bill.">
     <Row>
-      <RowLabel title="This month" sub="Realtime Translation usage on your key." />
+      <RowLabel title="This month" sub="Translation minutes sent this calendar month." />
       <span class="mono" style={css({ marginLeft: "auto", fontSize: 14, fontWeight: 500 })}>
-        ${store.account.usageUsd.toFixed(2)}
+        {store.account.monthMinutes.toFixed(1)} min · ${store.account.monthUsd.toFixed(2)}
       </span>
     </Row>
     <Row>
-      <RowLabel title="Last verified" sub="When Intervox last confirmed the key works." />
+      <RowLabel title="All time" sub="Total since you started using Intervox." />
+      <span class="mono" style={css({ marginLeft: "auto", fontSize: 14, fontWeight: 500 })}>
+        {store.account.totalMinutes.toFixed(1)} min · ${store.account.totalUsd.toFixed(2)}
+      </span>
+    </Row>
+    <Row>
+      <RowLabel title="Last verified" sub="When you last verified the key here." />
       <span style={css({ marginLeft: "auto", fontSize: 12.5, color: "var(--txt-2)" })}>
         {store.account.lastVerified ?? "—"}
       </span>
@@ -190,8 +195,8 @@
       <span style={css({ marginLeft: "auto" })}>
         <a
           href="https://platform.openai.com"
-          onclick={(e) => e.preventDefault()}
-          style={css({ fontSize: 12.5, color: "var(--c-mixed)", textDecoration: "none" })}
+          onclick={(e) => { e.preventDefault(); store.openExternalUrl("https://platform.openai.com"); }}
+          style={css({ fontSize: 12.5, color: "var(--c-mixed)", textDecoration: "none", cursor: "pointer" })}
         >
           platform.openai.com ↗
         </a>
@@ -218,8 +223,9 @@
     <div style={css({ fontSize: 13, fontWeight: 500, color: "var(--txt-1)", marginBottom: 4 })}>
       How BYOK works
     </div>
-    Your key is stored in the macOS Keychain and used only on your Mac. Intervox connects
-    directly from your machine to OpenAI's Realtime Translation endpoint — your audio,
-    transcripts, and key never pass through Intervox servers.
+    Your key is stored in Intervox's local app config on this Mac and used only
+    on your Mac. Intervox connects directly from your machine to OpenAI's
+    Realtime Translation endpoint — your audio, transcripts, and key never pass
+    through Intervox servers.
   </div>
 </div>

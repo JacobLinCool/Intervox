@@ -102,14 +102,19 @@ export interface LangCtx {
   sourceLangName: string; targetLangName: string; targetLangCode: string;
 }
 export function detectedSourceName(c: LangCtx): string {
-  if (c.sourceLangCode === "auto") return c.sourceDetected ? "Chinese" : "Listening";
+  // The realtime translation endpoint auto-detects the source language and
+  // does not report which language it picked. Never claim a specific source;
+  // show a neutral label instead of a hardcoded guess.
+  if (c.sourceLangCode === "auto") return c.sourceDetected ? "Auto" : "Listening";
   return c.sourceLangName;
 }
 export function langPair(c: LangCtx): string {
   return `${detectedSourceName(c)} → ${c.targetLangName}`;
 }
 export function isSameLang(c: LangCtx): boolean {
-  const detected = c.sourceLangCode === "auto"
-    ? (c.sourceDetected ? "zh" : null) : c.sourceLangCode;
-  return !!detected && detected === c.targetLangCode;
+  // Source is auto-detected and not reported back, so we cannot know whether
+  // it matches the target. Only flag a same-language clash for an explicit
+  // (non-auto) source.
+  if (c.sourceLangCode === "auto") return false;
+  return c.sourceLangCode === c.targetLangCode;
 }

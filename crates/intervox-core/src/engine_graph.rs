@@ -49,7 +49,10 @@ mod tests {
     #[test]
     fn translate_never_leaks_mic_to_ring() {
         for m in [Translate, TranslateWithOriginal] {
-            assert!(!FrameRouting::for_mode(m).mic_to_ring, "raw mic must not reach ring");
+            assert!(
+                !FrameRouting::for_mode(m).mic_to_ring,
+                "raw mic must not reach ring"
+            );
         }
     }
 }

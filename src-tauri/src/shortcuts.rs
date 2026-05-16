@@ -67,7 +67,10 @@ pub fn normalize_accelerator(raw: &str) -> Option<String> {
                 // building a minimal accelerator string and asking the plugin
                 // to parse it; if it fails the token is garbage.
                 let probe = format!("Shift+{token}");
-                if probe.parse::<tauri_plugin_global_shortcut::Shortcut>().is_err() {
+                if probe
+                    .parse::<tauri_plugin_global_shortcut::Shortcut>()
+                    .is_err()
+                {
                     return None;
                 }
                 // Store the token in the casing the parser accepts (it
@@ -79,13 +82,9 @@ pub fn normalize_accelerator(raw: &str) -> Option<String> {
     }
 
     let key = main_key?; // no main key → invalid
-    // Deduplicate modifiers while preserving the first occurrence order.
+                         // Deduplicate modifiers while preserving the first occurrence order.
     let mut seen = std::collections::HashSet::new();
-    let deduped: Vec<&str> = mods
-        .iter()
-        .filter(|&&m| seen.insert(m))
-        .copied()
-        .collect();
+    let deduped: Vec<&str> = mods.iter().filter(|&&m| seen.insert(m)).copied().collect();
 
     if deduped.is_empty() {
         // A shortcut with no modifiers is accepted by the parser but is
@@ -103,9 +102,7 @@ fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
-        Some(first) => {
-            first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-        }
+        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
     }
 }
 
@@ -143,15 +140,14 @@ pub fn register_shortcuts(app: &tauri::AppHandle) {
         };
 
         let app_clone = app.clone();
-        let result = app.global_shortcut().on_shortcut(
-            normalised.as_str(),
-            move |app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    execute_shortcut_action(app, action);
-                }
-                let _ = app_clone; // keep lifetime
-            },
-        );
+        let result =
+            app.global_shortcut()
+                .on_shortcut(normalised.as_str(), move |app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        execute_shortcut_action(app, action);
+                    }
+                    let _ = app_clone; // keep lifetime
+                });
 
         if let Err(e) = result {
             emit_shortcut_error(app, raw, &e.to_string());
@@ -159,7 +155,10 @@ pub fn register_shortcuts(app: &tauri::AppHandle) {
     };
 
     // toggle_translate
-    try_register(&shortcuts_cfg.toggle_translate, ShortcutAction::ToggleTranslate);
+    try_register(
+        &shortcuts_cfg.toggle_translate,
+        ShortcutAction::ToggleTranslate,
+    );
     // silence
     try_register(&shortcuts_cfg.silence, ShortcutAction::Silence);
     // captions

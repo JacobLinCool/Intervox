@@ -129,7 +129,8 @@ pub fn safety_identifier() -> String {
 ///
 /// # Parameters
 /// - `key`: The Bearer API key (never logged).
-/// - `src_lang` / `tgt_lang`: BCP-47 language codes for session configuration.
+/// - `tgt_lang`: BCP-47 target output language code (source is auto-detected
+///   by the endpoint and is not configurable).
 /// - `pcm_rx`: Incoming 24 kHz mono PCM16 frames from the graph loop (uplink).
 /// - `ev_tx`: Outgoing server events for the downstream consumer (Task 4.2 stub).
 ///
@@ -139,10 +140,10 @@ pub fn safety_identifier() -> String {
 /// - The task is aborted via `JoinHandle::abort()`.
 pub async fn run(
     key: String,
-    src_lang: String,
     tgt_lang: String,
     mut pcm_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
     ev_tx: tokio::sync::mpsc::Sender<TranslationEvent>,
+    uplink_samples: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
     let mut attempt: u32 = 0;
 
@@ -175,7 +176,10 @@ pub async fn run(
                     return;
                 }
             };
-            headers.insert(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION, auth_value);
+            headers.insert(
+                tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+                auth_value,
+            );
 
             // NOTE: `OpenAI-Beta: realtime=v1` was removed in the GA release of
             // /v1/realtime/translations.  Do NOT re-add it.
@@ -186,10 +190,7 @@ pub async fn run(
             // docs; we send it defensively per the GA migration notes.
             let sid = safety_identifier();
             if let Ok(sid_val) = HeaderValue::from_str(&sid) {
-                headers.insert(
-                    HeaderName::from_static("openai-safety-identifier"),
-                    sid_val,
-                );
+                headers.insert(HeaderName::from_static("openai-safety-identifier"), sid_val);
             }
             // If HeaderValue conversion fails (sid contains non-ASCII — should never
             // happen because we only store hex or "intervox-desktop"), we skip the
@@ -205,7 +206,7 @@ pub async fn run(
                 let (mut sink, mut stream) = ws_stream.split();
 
                 // Send session.update immediately on open.
-                let session_msg = build_session_update(&src_lang, &tgt_lang).to_string();
+                let session_msg = build_session_update(&tgt_lang).to_string();
                 if let Err(e) = sink.send(Message::Text(session_msg)).await {
                     eprintln!("[realtime] failed to send session.update: {e}");
                     // Fall through to reconnect.
@@ -238,6 +239,10 @@ pub async fn run(
                                             eprintln!("[realtime] send error");
                                             break true; // reconnect
                                         }
+                                        uplink_samples.fetch_add(
+                                            pcm.len() as u64,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     }
                                 }
                             }
@@ -350,7 +355,11 @@ mod tests {
         assert_eq!(backoff(3), Duration::from_millis(2_000), "attempt 3");
         assert_eq!(backoff(4), Duration::from_millis(4_000), "attempt 4");
         assert_eq!(backoff(5), Duration::from_millis(5_000), "attempt 5 (cap)");
-        assert_eq!(backoff(100), Duration::from_millis(5_000), "attempt 100 (cap)");
+        assert_eq!(
+            backoff(100),
+            Duration::from_millis(5_000),
+            "attempt 100 (cap)"
+        );
     }
 
     #[test]
@@ -400,7 +409,7 @@ mod tests {
 
     #[test]
     fn safety_identifier_is_stable_across_calls() {
-        // Call twice — should return the same value (persisted or fallback).
+        // Call twice: the identifier must stay stable for a single app install.
         let id1 = safety_identifier();
         let id2 = safety_identifier();
         assert_eq!(id1, id2, "safety_identifier must be stable across calls");

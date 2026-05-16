@@ -15,7 +15,10 @@ pub struct LevelMeter;
 impl LevelMeter {
     pub fn measure(samples: &[f32]) -> AudioLevel {
         if samples.is_empty() {
-            return AudioLevel { peak: 0.0, rms: 0.0 };
+            return AudioLevel {
+                peak: 0.0,
+                rms: 0.0,
+            };
         }
         let mut peak = 0.0f32;
         let mut sumsq = 0.0f64;
@@ -57,7 +60,11 @@ mod tests {
 
     #[test]
     fn serde_shape() {
-        let j = serde_json::to_string(&AudioLevel { peak: 0.5, rms: 0.25 }).unwrap();
+        let j = serde_json::to_string(&AudioLevel {
+            peak: 0.5,
+            rms: 0.25,
+        })
+        .unwrap();
         assert_eq!(j, r#"{"peak":0.5,"rms":0.25}"#);
     }
 }

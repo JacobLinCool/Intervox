@@ -1,17 +1,335 @@
 mod appcfg;
 mod commands;
+mod connection_log;
 mod devices;
 mod driver_status;
 mod engine;
 mod permission;
-mod secrets;
+mod platform_integration;
 mod shortcuts;
+mod transcript_log;
+mod usage_store;
 
 use commands::AppHandle;
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliProbeReport {
+    process_path: String,
+    bundled_driver_present: bool,
+    installed_driver_present: bool,
+    driver_state: driver_status::DriverState,
+    intervox_input_visible: bool,
+    input_device_count: usize,
+    output_device_count: usize,
+    mic_before: permission::MicPermission,
+    mic_after: permission::MicPermission,
+    api_key_file_read: bool,
+    api_key_saved: bool,
+    api_key_verified: bool,
+    api_validation_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_probe: Option<CliCaptureProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ring_probe: Option<CliRingProbe>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliCaptureProbe {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<engine::capture::CaptureProbeReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<intervox_core::AppError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRingProbe {
+    ok: bool,
+    mode_before: u32,
+    mode_after: u32,
+    write_index_before: u64,
+    write_index_after: u64,
+    read_index_before: u64,
+    read_index_after: u64,
+    write_delta_frames: u64,
+    read_delta_frames: u64,
+    available_frames_after: u64,
+    recent_max_abs_after: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct CliProbeOptions {
+    out_path: Option<String>,
+    api_key_file: Option<String>,
+    request_mic: bool,
+    capture_probe: bool,
+    ring_probe: bool,
+    capture_duration_ms: u64,
+}
+
+pub fn run_cli_probe_if_requested() -> bool {
+    let mut args = std::env::args().skip(1).peekable();
+    let mut options = CliProbeOptions {
+        out_path: None,
+        api_key_file: None,
+        request_mic: false,
+        capture_probe: false,
+        ring_probe: false,
+        capture_duration_ms: 2_000,
+    };
+    let mut requested = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--intervox-onboarding-probe" => requested = true,
+            "--intervox-capture-probe" => {
+                requested = true;
+                options.capture_probe = true;
+            }
+            "--intervox-ring-probe" => {
+                requested = true;
+                options.ring_probe = true;
+            }
+            "--out" => options.out_path = args.next(),
+            "--api-key-file" => options.api_key_file = args.next(),
+            "--request-mic" => options.request_mic = true,
+            "--capture-duration-ms" => {
+                if let Some(value) = args.next() {
+                    options.capture_duration_ms = value.parse().unwrap_or(2_000);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !requested {
+        return false;
+    }
+
+    let report = run_cli_probe(&options);
+    let payload = serde_json::to_string_pretty(&report).unwrap_or_else(|e| {
+        format!(
+            r#"{{"apiKeyFileRead":false,"apiKeySaved":false,"apiKeyVerified":false,"apiValidationStatus":"serialize-error:{e}"}}"#
+        )
+    });
+
+    if let Some(path) = options.out_path {
+        if let Err(e) = std::fs::write(&path, format!("{payload}\n")) {
+            eprintln!("failed to write probe report to {path}: {e}");
+            println!("{payload}");
+        }
+    } else {
+        println!("{payload}");
+    }
+
+    true
+}
+
+fn run_cli_probe(options: &CliProbeOptions) -> CliProbeReport {
+    let process_path = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<unknown>".into());
+
+    let bundled_driver_present = bundled_driver_present();
+    let mic_before = permission::status();
+    let mic_after = if options.request_mic {
+        permission::request_access()
+    } else {
+        mic_before
+    };
+
+    let (api_key_file_read, api_key_saved, api_key_verified, api_validation_status) =
+        probe_api_key(options.api_key_file.as_deref());
+
+    let devices = devices::enumerate();
+    let driver_state = driver_status::state_from_devices(&devices);
+    let intervox_input_visible = driver_status::visible_in_devices(&devices);
+    let capture_probe = if options.capture_probe {
+        let cfg = appcfg::load_or_default();
+        Some(run_capture_probe(
+            cfg.audio.source_mic_id.as_deref(),
+            options.capture_duration_ms,
+        ))
+    } else {
+        None
+    };
+    let ring_probe = if options.ring_probe {
+        Some(run_ring_probe(options.capture_duration_ms))
+    } else {
+        None
+    };
+
+    CliProbeReport {
+        process_path,
+        bundled_driver_present,
+        installed_driver_present: driver_status::installed_on_disk(),
+        driver_state,
+        intervox_input_visible,
+        input_device_count: devices.inputs.len(),
+        output_device_count: devices.outputs.len(),
+        mic_before,
+        mic_after,
+        api_key_file_read,
+        api_key_saved,
+        api_key_verified,
+        api_validation_status,
+        capture_probe,
+        ring_probe,
+    }
+}
+
+fn run_capture_probe(device_id: Option<&str>, duration_ms: u64) -> CliCaptureProbe {
+    let duration_ms = duration_ms.clamp(250, 10_000);
+    match engine::capture::probe_level(device_id, std::time::Duration::from_millis(duration_ms)) {
+        Ok(report) => CliCaptureProbe {
+            ok: report.callback_count > 0 && report.stream_error.is_none(),
+            report: Some(report),
+            error: None,
+        },
+        Err(error) => CliCaptureProbe {
+            ok: false,
+            report: None,
+            error: Some(error),
+        },
+    }
+}
+
+fn run_ring_probe(duration_ms: u64) -> CliRingProbe {
+    use intervox_core::virtual_mic::ring_buffer::{SharedRingMap, DEFAULT_SHM_NAME};
+    use std::sync::atomic::Ordering;
+
+    let duration_ms = duration_ms.clamp(250, 10_000);
+    let map = match SharedRingMap::open(DEFAULT_SHM_NAME) {
+        Ok(map) => map,
+        Err(e) => {
+            return CliRingProbe {
+                ok: false,
+                mode_before: 0,
+                mode_after: 0,
+                write_index_before: 0,
+                write_index_after: 0,
+                read_index_before: 0,
+                read_index_after: 0,
+                write_delta_frames: 0,
+                read_delta_frames: 0,
+                available_frames_after: 0,
+                recent_max_abs_after: 0.0,
+                error: Some(e.to_string()),
+            };
+        }
+    };
+
+    let ring = map.get();
+    let mode_before = ring.mode.load(Ordering::Acquire);
+    let write_before = ring.write_index.load(Ordering::Acquire);
+    let read_before = ring.read_index.load(Ordering::Acquire);
+    std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    let mode_after = ring.mode.load(Ordering::Acquire);
+    let write_after = ring.write_index.load(Ordering::Acquire);
+    let read_after = ring.read_index.load(Ordering::Acquire);
+    let write_delta = write_after.saturating_sub(write_before);
+    let read_delta = read_after.saturating_sub(read_before);
+    let recent_max_abs_after = ring.recent_max_abs(48_000);
+
+    CliRingProbe {
+        ok: write_delta > 0,
+        mode_before,
+        mode_after,
+        write_index_before: write_before,
+        write_index_after: write_after,
+        read_index_before: read_before,
+        read_index_after: read_after,
+        write_delta_frames: write_delta,
+        read_delta_frames: read_delta,
+        available_frames_after: write_after.saturating_sub(read_after),
+        recent_max_abs_after,
+        error: None,
+    }
+}
+
+fn bundled_driver_present() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(contents_dir) = exe.parent().and_then(|p| p.parent()) else {
+        return false;
+    };
+    contents_dir
+        .join("Resources")
+        .join("driver/build/Intervox.driver")
+        .is_dir()
+}
+
+fn probe_api_key(api_key_file: Option<&str>) -> (bool, bool, bool, String) {
+    let Some(path) = api_key_file else {
+        return (false, false, false, "not-requested".into());
+    };
+
+    let key = match std::fs::read_to_string(path) {
+        Ok(key) => key.trim().to_string(),
+        Err(e) => return (false, false, false, format!("read-error:{e}")),
+    };
+    if key.is_empty() {
+        return (true, false, false, "empty-key-file".into());
+    }
+
+    let mut cfg = appcfg::load_or_default();
+    cfg.account.openai_api_key = Some(key.clone());
+    cfg.account.openai_api_key_verified = false;
+    cfg.account.openai_api_key_last_verified = None;
+    appcfg::persist(&cfg);
+
+    let verified = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt.block_on(async {
+            use intervox_core::realtime::openai_auth::{
+                classify_validation, KeyValidation, VALIDATION_URL,
+            };
+
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .build()
+            {
+                Ok(client) => client,
+                Err(e) => return (false, format!("client-error:{e}")),
+            };
+
+            let http_status = match client.get(VALIDATION_URL).bearer_auth(&key).send().await {
+                Ok(resp) => Some(resp.status().as_u16()),
+                Err(e) => return (false, format!("network-error:{e}")),
+            };
+
+            match classify_validation(http_status) {
+                KeyValidation::Verified => {
+                    let mut cfg = appcfg::load_or_default();
+                    cfg.account.openai_api_key_verified = true;
+                    appcfg::persist(&cfg);
+                    (true, "verified".into())
+                }
+                KeyValidation::InvalidKey => (false, "invalid-key".into()),
+                KeyValidation::Offline => (false, "offline".into()),
+                KeyValidation::Unknown => {
+                    let status = http_status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "none".into());
+                    (false, format!("unknown-status:{status}"))
+                }
+            }
+        }),
+        Err(e) => (false, format!("runtime-error:{e}")),
+    };
+
+    (true, true, verified.0, verified.1)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    secrets::migrate_legacy();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppHandle::hydrated())
@@ -22,6 +340,20 @@ pub fn run() {
             let engine =
                 std::sync::Arc::new(crate::engine::Engine::new(app.handle().clone(), &cfg));
             app.manage(engine.clone());
+            let initial_mode = {
+                use tauri::Manager;
+                let h = app.state::<AppHandle>();
+                let mode = h.state.lock().unwrap().status.mode;
+                mode
+            };
+            engine.set_mode(initial_mode);
+
+            // ── Platform integration (dock policy, login item) ────────────────
+            // FIX-4: reuse the `cfg` already loaded above — no second disk read.
+            // FIX-3d: initialise the engine's show_latency_badge atomic from the
+            // same config so the pull_task starts with the correct value.
+            crate::platform_integration::apply_ui_config(app.handle(), &cfg.ui);
+            engine.set_show_latency_badge(cfg.ui.show_latency_badge);
 
             // ── Native macOS tray menu ────────────────────────────────────────
             // Read the current mode from persisted config to set initial
@@ -75,8 +407,7 @@ pub fn run() {
             let sep1 = PredefinedMenuItem::separator(app)?;
             let show_window =
                 MenuItem::with_id(app, "show_window", "Show Window", true, None::<&str>)?;
-            let captions =
-                MenuItem::with_id(app, "captions", "Captions", true, None::<&str>)?;
+            let captions = MenuItem::with_id(app, "captions", "Captions", true, None::<&str>)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Intervox", true, None::<&str>)?;
 
@@ -124,8 +455,7 @@ pub fn run() {
                                 _ => VirtualMicMode::TranslateWithOriginal,
                             };
                             let h = app.state::<AppHandle>();
-                            let engine =
-                                app.state::<std::sync::Arc<crate::engine::Engine>>();
+                            let engine = app.state::<std::sync::Arc<crate::engine::Engine>>();
                             commands::apply_mode(app, &h, &engine, mode);
                         }
 
@@ -146,8 +476,7 @@ pub fn run() {
                                 let _ = commands::do_close_captions_window(app);
                             } else {
                                 let h = app.state::<commands::AppHandle>();
-                                let always_on_top =
-                                    h.config.lock().unwrap().captions.always_on_top;
+                                let always_on_top = h.config.lock().unwrap().captions.always_on_top;
                                 let _ = commands::do_open_captions_window(app, always_on_top);
                             }
                         }
@@ -174,30 +503,42 @@ pub fn run() {
                 mode_translate_orig,
             });
 
-            // ── 5 s polling task (device list + driver status) ────────────────
+            // ── Low-frequency device poll (device list + driver status) ───────
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(std::time::Duration::from_secs(5));
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+                // Avoid competing with frontend startup, which performs its own
+                // first device enumeration after the shell is responsive.
+                tick.tick().await;
                 loop {
                     tick.tick().await;
 
                     // ── device list ──────────────────────────────────────────
-                    // enumerate() is sync and returns owned data — no cpal
-                    // type crosses this await point.
-                    let devices = crate::devices::enumerate();
+                    // CoreAudio enumeration can block when coreaudiod is wedged.
+                    // Use one bounded in-flight query and derive all later
+                    // status from the same snapshot.
+                    let enum_flag = {
+                        use tauri::Manager;
+                        let app_handle = handle.state::<commands::AppHandle>();
+                        std::sync::Arc::clone(&app_handle.audio_enumeration_running)
+                    };
+                    let devices = match commands::enumerate_audio_devices_bounded(enum_flag).await {
+                        Ok(devices) => devices,
+                        Err(_) => continue,
+                    };
 
                     // ── driver presence ──────────────────────────────────────
-                    // Both calls are sync, read-only, and return owned bools.
-                    // No MutexGuard or cpal type is held across the await above.
-                    let installed = crate::driver_status::installed_on_disk()
-                        && crate::driver_status::visible_to_coreaudio();
+                    // Derive this from the device snapshot above; do not trigger
+                    // a second CoreAudio enumeration.
+                    let driver_state = crate::driver_status::state_from_devices(&devices);
+                    let installed = driver_state == crate::driver_status::DriverState::Healthy;
 
                     // Update managed state and capture a clone for the event.
                     // The MutexGuard is dropped before the next await point.
                     use tauri::Manager;
                     let status_clone = {
                         let app_handle = handle.state::<commands::AppHandle>();
+                        *app_handle.driver_state.lock().unwrap() = driver_state;
                         let mut st = app_handle.state.lock().unwrap();
                         st.status.virtual_mic_installed = installed;
                         st.status.clone()
@@ -218,6 +559,7 @@ pub fn run() {
             commands::get_app_status,
             commands::set_virtual_mic_mode,
             commands::get_audio_devices,
+            commands::get_audio_levels,
             commands::set_source_mic,
             commands::set_monitor_output,
             commands::set_target_language,
@@ -229,7 +571,10 @@ pub fn run() {
             commands::open_audio_midi_setup,
             commands::open_system_mic_permission_settings,
             commands::get_mic_permission,
+            commands::request_mic_permission,
             commands::start_test_phrase,
+            commands::start_mic_level_probe,
+            commands::stop_mic_level_probe,
             commands::clear_transcript_history,
             commands::stop_all_audio,
             commands::get_config,
@@ -237,7 +582,6 @@ pub fn run() {
             commands::set_api_key,
             commands::verify_api_key,
             commands::clear_api_key,
-            commands::set_source_language,
             commands::set_quality_mode,
             commands::set_mix_percent,
             commands::set_captions_config,
@@ -247,6 +591,9 @@ pub fn run() {
             commands::open_captions_window,
             commands::close_captions_window,
             commands::open_accessibility_settings,
+            commands::get_connection_log,
+            commands::set_ui_config,
+            commands::open_external_url,
         ]);
 
     let app = builder

@@ -7,9 +7,9 @@
 //! - `PassThrough`: write raw mic audio to the virtual mic ring and measure
 //!   output level.
 //! - `Translate` / `TranslateWithOriginal`: resample 48 kHz → 24 kHz, convert
-//!   to PCM16, and `try_send` into the uplink channel to the OpenAI transport.
-//!   The raw mic frame is NEVER written to the ring in these modes (no-leak
-//!   guarantee).
+//!   to PCM16, repacketize into fixed 40 ms OpenAI uplink chunks, and `try_send`
+//!   into the uplink channel to the OpenAI transport. The raw mic frame is NEVER
+//!   written to the ring in these modes (no-leak guarantee).
 //! - `TranslateWithOriginal` additionally taps the 48 kHz mono frame into the
 //!   shared `original_queue` (bounded VecDeque) so the pull task can later mix
 //!   the delayed original under the translated audio (Task 4.3).
@@ -42,63 +42,124 @@ use intervox_core::state::VirtualMicMode;
 use intervox_core::FrameRouting;
 
 use super::ring::RingProducer;
-use super::translate_chain::{push_original_samples, SharedOriginalQueue};
+use super::translate_chain::{
+    push_original_samples, SharedOriginalQueue, OPENAI_UPLINK_CHUNK_SAMPLES,
+};
 
 /// Shared uplink slot type alias — mirrors the one in `engine/mod.rs`.
 type UplinkSlot = Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
 
+/// Fixed-size uplink packetizer for OpenAI Realtime audio.
+///
+/// CPAL/CoreAudio callback sizes vary by device and system state.  The realtime
+/// transport should not inherit those callback boundaries, because tiny or uneven
+/// websocket messages waste CPU and make latency less predictable.  This chunker
+/// accepts 24 kHz mono PCM16 samples and emits exactly 40 ms chunks.
+pub(super) struct OpenAiChunker {
+    pending: Vec<i16>,
+}
+
+impl OpenAiChunker {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(OPENAI_UPLINK_CHUNK_SAMPLES),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    #[cfg(test)]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn push<F>(&mut self, mut samples: &[i16], mut emit: F)
+    where
+        F: FnMut(Vec<i16>),
+    {
+        while !samples.is_empty() {
+            let remaining = OPENAI_UPLINK_CHUNK_SAMPLES - self.pending.len();
+            let take = remaining.min(samples.len());
+            self.pending.extend_from_slice(&samples[..take]);
+            samples = &samples[take..];
+
+            if self.pending.len() == OPENAI_UPLINK_CHUNK_SAMPLES {
+                let chunk = std::mem::replace(
+                    &mut self.pending,
+                    Vec::with_capacity(OPENAI_UPLINK_CHUNK_SAMPLES),
+                );
+                emit(chunk);
+            }
+        }
+    }
+}
+
+/// Runtime dependencies for routing one captured frame.
+pub(super) struct RouteFrameContext<'a> {
+    /// Shared ring producer (written only in PassThrough).
+    pub ring: &'a RingProducer,
+    /// Shared output RMS (written in PassThrough; cleared otherwise).
+    pub out_level: &'a AtomicU32,
+    /// Shared slot for the OpenAI uplink `Sender`.
+    pub uplink_slot: &'a UplinkSlot,
+    /// Persistent streaming resampler (48 kHz → 24 kHz).
+    pub resampler: &'a mut LinearResampler,
+    /// Persistent 24 kHz PCM16 chunker that emits fixed 40 ms OpenAI packets.
+    pub uplink_chunker: &'a mut OpenAiChunker,
+    /// Optional 48 kHz original-audio tap for TranslateWithOriginal.
+    pub original_queue: Option<&'a SharedOriginalQueue>,
+}
+
 /// Route a single 48 kHz mono `frame` according to the current `mode`.
 ///
-/// # Parameters
-/// - `mode`: current engine mode (read lock-free from `mode_atomic`).
-/// - `frame`: 48 kHz mono f32 samples from the CPAL capture thread.
-/// - `ring`: shared ring producer (written only in PassThrough).
-/// - `out_level`: shared output RMS (written in PassThrough; cleared otherwise).
-/// - `uplink_slot`: shared slot for the OpenAI uplink `Sender`.
-/// - `resampler`: persistent streaming resampler (48 kHz → 24 kHz).
-///   Caller must create one `LinearResampler::new(48_000, 24_000)` and reuse
-///   it across frames so phase state carries across chunk boundaries.
-/// - `original_queue`: optional shared queue for the 48 kHz original-audio tap
-///   (Task 4.3).  `Some(queue)` when mode is `TranslateWithOriginal`; `None`
-///   for `Translate` (original not needed) and all other modes.
-///   In `TranslateWithOriginal`, the SAME 48 kHz mono frame that goes up the
-///   uplink is also pushed here so the pull task can mix delayed original under
-///   the translated audio.  No leak: only this queue is written, not the ring.
-pub fn route_frame(
+/// Returns `true` only when a fixed 40 ms OpenAI uplink chunk was successfully
+/// enqueued to the realtime transport.
+pub(super) fn route_frame(
     mode: VirtualMicMode,
     frame: &[f32],
-    ring: &RingProducer,
-    out_level: &AtomicU32,
-    uplink_slot: &UplinkSlot,
-    resampler: &mut LinearResampler,
-    original_queue: Option<&SharedOriginalQueue>,
-) {
+    ctx: RouteFrameContext<'_>,
+) -> bool {
     let routing = FrameRouting::for_mode(mode);
 
     if routing.mic_to_ring {
-        // PassThrough: write raw mic audio to the virtual mic ring.
-        ring.write(frame);
+        ctx.uplink_chunker.clear();
+        // PassThrough: write raw mic audio to the virtual mic ring.  This is a
+        // live path, so it must drop stale unread backlog rather than queueing
+        // seconds of delayed microphone audio.
+        ctx.ring.write_live(frame);
         let level = LevelMeter::measure(frame);
-        out_level.store(level.rms.to_bits(), Ordering::Relaxed);
+        ctx.out_level.store(level.rms.to_bits(), Ordering::Relaxed);
+        false
     } else if routing.mic_to_openai {
         // Translate / TranslateWithOriginal: do NOT leak raw mic to ring.
         //
         // 1. Resample 48 kHz → 24 kHz (streaming; resampler carries phase
         //    across frames so there are no discontinuities at chunk boundaries).
         // 2. Convert f32 → PCM16 little-endian.
-        // 3. Non-blocking try_send into the uplink channel.
+        // 3. Repacketize into fixed 40 ms chunks.
+        // 4. Non-blocking try_send into the uplink channel.
         //    - Drops on full (never block, never grow latency).
         //    - No-op when slot is empty (no active OpenAI session).
-        let down = resampler.process(frame);
+        let maybe_tx = ctx.uplink_slot.lock().clone();
+        let Some(tx) = maybe_tx else {
+            ctx.uplink_chunker.clear();
+            ctx.out_level.store(0, Ordering::Relaxed);
+            return false;
+        };
+
+        let down = ctx.resampler.process(frame);
         let pcm = intervox_core::audio::pcm::f32_to_pcm16(&down);
 
-        // Read the sender from the slot — lock time is sub-microsecond.
-        let maybe_tx = uplink_slot.lock().clone();
-        if let Some(tx) = maybe_tx {
+        let mut sent_to_openai = false;
+        ctx.uplink_chunker.push(&pcm, |chunk| {
             // try_send is callable from a blocking thread (it does not .await).
             // Drop on full — never block, never grow latency.
-            let _ = tx.try_send(pcm);
-        }
+            if tx.try_send(chunk).is_ok() {
+                sent_to_openai = true;
+            }
+        });
 
         // Task 4.3: when in TranslateWithOriginal (mix_original == true),
         // also push the SAME 48 kHz mono frame into the original-audio tap
@@ -106,17 +167,20 @@ pub fn route_frame(
         // This is ONLY done when the queue is provided (mix_original path).
         // Translate mode passes None so the push is skipped entirely.
         if routing.mix_original {
-            if let Some(q) = original_queue {
+            if let Some(q) = ctx.original_queue {
                 push_original_samples(q, frame);
             }
         }
 
         // out_level stays 0 in translate modes until the pull task writes
         // translated audio into the ring and measures its level instead.
-        out_level.store(0, Ordering::Relaxed);
+        ctx.out_level.store(0, Ordering::Relaxed);
+        sent_to_openai
     } else {
+        ctx.uplink_chunker.clear();
         // Silence (defensive): drop frame.
-        out_level.store(0, Ordering::Relaxed);
+        ctx.out_level.store(0, Ordering::Relaxed);
+        false
     }
 }
 
@@ -174,11 +238,11 @@ mod tests {
         }
     }
 
-    type TestUplinkSlot =
-        Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
+    type TestUplinkSlot = Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
 
     // A pure routing helper that mirrors `route_frame` but takes a
     // `TestRingProducer` instead of a real `RingProducer` so no shm is needed.
+    #[allow(clippy::too_many_arguments)]
     fn route_frame_test(
         mode: VirtualMicMode,
         frame: &[f32],
@@ -186,32 +250,47 @@ mod tests {
         out_level: &AtomicU32,
         uplink_slot: &TestUplinkSlot,
         resampler: &mut LinearResampler,
+        uplink_chunker: &mut super::OpenAiChunker,
         original_queue: Option<&translate_chain::SharedOriginalQueue>,
-    ) {
+    ) -> bool {
         use intervox_core::audio::level_meter::LevelMeter;
         use intervox_core::FrameRouting;
 
         let routing = FrameRouting::for_mode(mode);
 
         if routing.mic_to_ring {
+            uplink_chunker.clear();
             ring.write(frame);
             let level = LevelMeter::measure(frame);
             out_level.store(level.rms.to_bits(), Ordering::Relaxed);
+            false
         } else if routing.mic_to_openai {
+            let maybe_tx = uplink_slot.lock().clone();
+            let Some(tx) = maybe_tx else {
+                uplink_chunker.clear();
+                out_level.store(0, Ordering::Relaxed);
+                return false;
+            };
+
             let down = resampler.process(frame);
             let pcm = intervox_core::audio::pcm::f32_to_pcm16(&down);
-            let maybe_tx = uplink_slot.lock().clone();
-            if let Some(tx) = maybe_tx {
-                let _ = tx.try_send(pcm);
-            }
+            let mut sent = false;
+            uplink_chunker.push(&pcm, |chunk| {
+                if tx.try_send(chunk).is_ok() {
+                    sent = true;
+                }
+            });
             if routing.mix_original {
                 if let Some(q) = original_queue {
                     translate_chain::push_original_samples(q, frame);
                 }
             }
             out_level.store(0, Ordering::Relaxed);
+            sent
         } else {
+            uplink_chunker.clear();
             out_level.store(0, Ordering::Relaxed);
+            false
         }
     }
 
@@ -225,11 +304,37 @@ mod tests {
     }
 
     #[test]
+    fn openai_chunker_emits_only_fixed_40ms_chunks() {
+        let mut chunker = super::OpenAiChunker::new();
+        let mut chunks = Vec::new();
+
+        chunker.push(&vec![1; 400], |chunk| chunks.push(chunk));
+        assert!(chunks.is_empty(), "partial chunks must not be emitted");
+        assert_eq!(chunker.pending_len(), 400);
+
+        chunker.push(&vec![2; 560], |chunk| chunks.push(chunk));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES);
+        assert_eq!(chunker.pending_len(), 0);
+
+        chunker.push(&vec![3; translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES * 2 + 7], |chunk| {
+            chunks.push(chunk);
+        });
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|chunk| chunk.len() == translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES));
+        assert_eq!(chunker.pending_len(), 7);
+
+        chunker.clear();
+        assert_eq!(chunker.pending_len(), 0);
+    }
+
+    #[test]
     fn passthrough_writes_to_ring_and_sets_out_level() {
         let ring = TestRingProducer::new();
         let out_level = AtomicU32::new(0);
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         route_frame_test(
             VirtualMicMode::PassThrough,
@@ -238,12 +343,16 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             None,
         );
 
         assert!(ring.was_written(), "PassThrough must write frame to ring");
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
-        assert!(rms > 0.0, "PassThrough must produce non-zero out_level, got {rms}");
+        assert!(
+            rms > 0.0,
+            "PassThrough must produce non-zero out_level, got {rms}"
+        );
     }
 
     #[test]
@@ -252,6 +361,7 @@ mod tests {
         let out_level = AtomicU32::new(u32::MAX); // pre-set to non-zero
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         route_frame_test(
             VirtualMicMode::Translate,
@@ -260,10 +370,14 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             None,
         );
 
-        assert!(!ring.was_written(), "Translate must NOT write raw mic to ring (no-leak)");
+        assert!(
+            !ring.was_written(),
+            "Translate must NOT write raw mic to ring (no-leak)"
+        );
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
         assert_eq!(rms, 0.0, "Translate must clear out_level to 0, got {rms}");
     }
@@ -274,6 +388,7 @@ mod tests {
         let out_level = AtomicU32::new(u32::MAX);
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         route_frame_test(
             VirtualMicMode::TranslateWithOriginal,
@@ -282,10 +397,14 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             None,
         );
 
-        assert!(!ring.was_written(), "TranslateWithOriginal must NOT write raw mic to ring");
+        assert!(
+            !ring.was_written(),
+            "TranslateWithOriginal must NOT write raw mic to ring"
+        );
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
         assert_eq!(rms, 0.0, "TranslateWithOriginal must clear out_level to 0");
     }
@@ -296,6 +415,7 @@ mod tests {
         let out_level = AtomicU32::new(u32::MAX);
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         route_frame_test(
             VirtualMicMode::Silence,
@@ -304,6 +424,7 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             None,
         );
 
@@ -318,6 +439,7 @@ mod tests {
         let out_level = AtomicU32::new(u32::MAX);
         let frame = vec![0.0f32; 480]; // silence frame
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         route_frame_test(
             VirtualMicMode::PassThrough,
@@ -326,46 +448,57 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             None,
         );
 
-        assert!(ring.was_written(), "PassThrough must write even a zero frame");
+        assert!(
+            ring.was_written(),
+            "PassThrough must write even a zero frame"
+        );
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
         assert_eq!(rms, 0.0, "zero frame must produce rms=0.0, got {rms}");
     }
 
     #[test]
-    fn translate_sends_pcm16_to_uplink_when_slot_is_filled() {
+    fn translate_sends_fixed_40ms_pcm16_chunks_to_uplink() {
         let ring = TestRingProducer::new();
         let out_level = AtomicU32::new(0);
-        // 480-sample 48 kHz frame — resampled to ~240 24 kHz samples.
+        // 480-sample 48 kHz frame — resampled to 240 24 kHz samples.
+        // Four such frames make one fixed 40 ms OpenAI uplink chunk.
         let frame: Vec<f32> = (0..480).map(|i| (i as f32 / 480.0) * 0.5).collect();
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<i16>>(16);
         let uplink: TestUplinkSlot = Arc::new(parking_lot::Mutex::new(Some(tx)));
 
-        route_frame_test(
-            VirtualMicMode::Translate,
-            &frame,
-            &ring,
-            &out_level,
-            &uplink,
-            &mut resampler,
-            None,
-        );
+        for i in 0..4 {
+            let sent = route_frame_test(
+                VirtualMicMode::Translate,
+                &frame,
+                &ring,
+                &out_level,
+                &uplink,
+                &mut resampler,
+                &mut chunker,
+                None,
+            );
+            assert_eq!(sent, i == 3, "only the fourth 10 ms frame completes a 40 ms chunk");
+        }
 
-        assert!(!ring.was_written(), "Translate must NOT write raw mic to ring");
-
-        // The PCM16 frame should have been sent.
-        let received = rx.try_recv().expect("uplink should have received a frame");
-        assert!(!received.is_empty(), "PCM16 frame must not be empty");
-        // Should be roughly half the input samples (48k → 24k).
         assert!(
-            received.len() > 100 && received.len() < 300,
-            "expected ~240 samples after 2x downsample, got {}",
-            received.len()
+            !ring.was_written(),
+            "Translate must NOT write raw mic to ring"
         );
+
+        let received = rx.try_recv().expect("uplink should have received one chunk");
+        assert_eq!(
+            received.len(),
+            translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES,
+            "OpenAI uplink chunk must be exactly 40 ms at 24 kHz"
+        );
+        assert!(rx.try_recv().is_err(), "only one chunk should be sent");
     }
 
     #[test]
@@ -374,6 +507,7 @@ mod tests {
         let out_level = AtomicU32::new(0);
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
 
         // No sender in the slot — must not panic.
         route_frame_test(
@@ -383,12 +517,18 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             None,
         );
 
         assert!(!ring.was_written());
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
         assert_eq!(rms, 0.0);
+        assert_eq!(
+            chunker.pending_len(),
+            0,
+            "no OpenAI session means no pre-session audio may accumulate"
+        );
     }
 
     /// Verify that `route_frame` (the real one using `RingProducer`) compiles
@@ -400,14 +540,18 @@ mod tests {
         uplink: &super::UplinkSlot,
         resampler: &mut LinearResampler,
     ) {
+        let mut chunker = super::OpenAiChunker::new();
         super::route_frame(
             VirtualMicMode::PassThrough,
             &[],
-            ring,
-            out_level,
-            uplink,
-            resampler,
-            None,
+            super::RouteFrameContext {
+                ring,
+                out_level,
+                uplink_slot: uplink,
+                resampler,
+                uplink_chunker: &mut chunker,
+                original_queue: None,
+            },
         );
     }
 
@@ -419,15 +563,19 @@ mod tests {
         let out_level = AtomicU32::new(0);
         let frame: Vec<f32> = vec![0.5f32; translate_chain::PULL_FRAMES];
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
         let queue = translate_chain::new_original_queue();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<i16>>(16);
+        let uplink: TestUplinkSlot = Arc::new(parking_lot::Mutex::new(Some(tx)));
 
         route_frame_test(
             VirtualMicMode::TranslateWithOriginal,
             &frame,
             &ring,
             &out_level,
-            &empty_uplink(),
+            &uplink,
             &mut resampler,
+            &mut chunker,
             Some(&queue),
         );
 
@@ -448,6 +596,7 @@ mod tests {
         let out_level = AtomicU32::new(0);
         let frame: Vec<f32> = vec![0.5f32; translate_chain::PULL_FRAMES];
         let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
         // Even if a queue is passed, Translate mode must not push to it.
         let queue = translate_chain::new_original_queue();
 
@@ -458,6 +607,7 @@ mod tests {
             &out_level,
             &empty_uplink(),
             &mut resampler,
+            &mut chunker,
             Some(&queue),
         );
 

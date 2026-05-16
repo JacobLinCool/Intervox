@@ -3,7 +3,7 @@
   import { MODES } from "$lib/constants";
   import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown } from "$lib/controls";
   import { SysIcon } from "$lib/icons";
-  import { VUStrip } from "$lib/vu";
+  import { VUStrip, formatDbfs } from "$lib/vu";
   import { css } from "$lib/util";
   import ModeCard from "./ModeCard.svelte";
 
@@ -25,7 +25,7 @@
       <ModeCard
         meta={m}
         selected={store.mode === m.id}
-        onclick={() => store.setMode(m.id)}
+        onSelect={() => store.setMode(m.id)}
       />
     {/each}
   </div>
@@ -59,6 +59,9 @@
     {/if}
     <div style={css({ marginLeft: "auto", width: 120 })}>
       <VUStrip level={store.inputLevel} color="var(--c-mixed)" />
+      <div style={css({ marginTop: 4, textAlign: "right", fontSize: 10.5, color: "var(--txt-3)" })}>
+        {formatDbfs(store.inputLevel)}
+      </div>
     </div>
   </Row>
 </FieldGroup>
@@ -120,4 +123,3 @@
     </span>
   </Row>
 </FieldGroup>
-

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/svelte";
 import { VUBars, VUStrip, VUDots } from "./index";
+import { rmsToVuLevel } from "./level";
 describe("vu meters honest idle", () => {
   it("VUBars at level 0 renders bars, none lit (muted bg)", () => {
     const { container } = render(VUBars as any, { props: { level: 0, bars: 5 } });
@@ -22,5 +23,10 @@ describe("vu meters honest idle", () => {
   it("VUDots renders count dots", () => {
     const { container } = render(VUDots as any, { props: { level: 0, count: 4 } });
     expect(container.querySelectorAll("span > span").length).toBe(4);
+  });
+  it("maps low microphone RMS into a visible display level", () => {
+    expect(rmsToVuLevel(0)).toBe(0);
+    expect(rmsToVuLevel(0.0017)).toBeGreaterThan(0.08);
+    expect(rmsToVuLevel(1)).toBe(1);
   });
 });

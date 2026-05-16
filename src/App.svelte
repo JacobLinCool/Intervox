@@ -6,6 +6,7 @@
   import Captions from "./components/Captions.svelte";
   import Onboarding from "./components/Onboarding.svelte";
   import QuickStatus from "./components/QuickStatus.svelte";
+  import Toast from "./components/Toast.svelte";
   import { css } from "$lib/util";
 
   const WALLPAPERS: Record<string, string> = {
@@ -53,6 +54,7 @@
 
 <div class="stage">
   <Settings />
+  <Toast />
 
   {#if store.captionsOpen && !store.onboardingOpen}
     <Captions />

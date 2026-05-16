@@ -114,6 +114,15 @@ impl AppError {
         )
     }
 
+    pub fn audio_device_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            AppErrorCode::AudioDeviceLost,
+            "Audio device unavailable",
+            message,
+            None,
+        )
+    }
+
     /// Like `audio_device_lost` but with a `RecoveryAction` pointing at
     /// `set_virtual_mic_mode`.  The frontend error banner will render a "Retry"
     /// button that invokes `set_virtual_mic_mode` to re-enter the current mode
@@ -152,13 +161,24 @@ impl AppError {
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(AppErrorCode::Internal, "Something went wrong", message, None)
+        Self::new(
+            AppErrorCode::Internal,
+            "Something went wrong",
+            message,
+            None,
+        )
     }
 }
 
 impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {}: {}", self.code.as_str(), self.title, self.message)
+        write!(
+            f,
+            "[{}] {}: {}",
+            self.code.as_str(),
+            self.title,
+            self.message
+        )
     }
 }
 
@@ -201,13 +221,19 @@ mod tests {
     #[test]
     fn audio_device_lost_retryable_has_recovery_action() {
         let e = AppError::audio_device_lost_retryable();
-        let ra = e.recovery_action.as_ref().expect("must have recovery action");
+        let ra = e
+            .recovery_action
+            .as_ref()
+            .expect("must have recovery action");
         assert_eq!(ra.label, "Retry");
         assert_eq!(ra.command, "set_virtual_mic_mode");
         assert_eq!(e.code, AppErrorCode::AudioDeviceLost);
         // Verify it serializes with recovery_action present.
         let j = serde_json::to_string(&e).unwrap();
-        assert!(j.contains("recovery_action"), "retryable error must include recovery_action in JSON");
+        assert!(
+            j.contains("recovery_action"),
+            "retryable error must include recovery_action in JSON"
+        );
     }
 
     #[test]
@@ -245,6 +271,9 @@ mod tests {
         // The message is the human description, not the key string.
         assert_eq!(e.message, "Invalid API key");
         // It must not resemble a real key.
-        assert!(!e.message.starts_with("sk-"), "message must not be the key value");
+        assert!(
+            !e.message.starts_with("sk-"),
+            "message must not be the key value"
+        );
     }
 }

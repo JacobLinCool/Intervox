@@ -1,5 +1,6 @@
 <script lang="ts">
   import { css } from "$lib/util";
+  import { rmsToVuLevel } from "./level";
 
   let {
     level = 0,
@@ -18,13 +19,15 @@
     barWidth?: number;
     seed?: number;
   } = $props();
+
+  const displayLevel = $derived(rmsToVuLevel(level));
 </script>
 
 <span style={css({ display: "inline-flex", alignItems: "flex-end", gap, height })}>
   {#each Array.from({ length: bars }) as _, i}
     {@const phase = (Math.sin(i * 0.45 + seed) + 1) / 2}
-    {@const local = Math.max(0.08, Math.min(1, level * (0.55 + phase * 0.85) - i * 0.025))}
-    {@const lit = i / bars < level}
+    {@const local = Math.max(0.08, Math.min(1, displayLevel * (0.55 + phase * 0.85) - i * 0.025))}
+    {@const lit = i / bars < displayLevel}
     <span
       style={css({
         width: barWidth,

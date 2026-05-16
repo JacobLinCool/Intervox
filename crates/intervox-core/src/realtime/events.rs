@@ -39,6 +39,8 @@ pub enum TranslationEvent {
         text: String,
         elapsed_ms: Option<u64>,
     },
+    InputTranscriptDone,
+    OutputTranscriptDone,
     Error {
         code: Option<String>,
         message: String,
@@ -53,16 +55,13 @@ pub enum TranslationEvent {
 ///
 /// Per the official translations guide the only required session field is the
 /// **target output language** (`session.audio.output.language`).  The source
-/// language is auto-detected by the endpoint — `source_language` is kept as a
-/// parameter for API compatibility but is NOT sent in the payload.
+/// language is auto-detected by the endpoint and is not configurable, so it is
+/// not part of this payload.
 ///
 /// Do NOT include `session.audio.input` (fields like `noise_reduction` or
 /// `transcription.model`) — they trigger GA type errors on the translations
 /// endpoint and reference the non-existent model `gpt-realtime-whisper`.
-pub fn build_session_update(source_language: &str, target_language: &str) -> Value {
-    // source_language: translation endpoint auto-detects source; kept for
-    // caller compatibility only.
-    let _ = source_language;
+pub fn build_session_update(target_language: &str) -> Value {
     json!({
         "type": "session.update",
         "session": {
@@ -113,8 +112,7 @@ pub fn parse_server_event(raw: &str) -> TranslationEvent {
         // ── Translated audio (primary: GA; secondary: legacy response.* name) ─
         // SPEC: official field is `session.output_audio.delta`; `delta` carries
         // base64 PCM16 at 24 kHz mono.
-        "session.output_audio.delta"
-        | "response.output_audio.delta" => {
+        "session.output_audio.delta" | "response.output_audio.delta" => {
             let b64 = v.get("delta").and_then(|d| d.as_str()).unwrap_or("");
             match pcm::base64_to_pcm16(b64) {
                 Ok(pcm16) => TranslationEvent::OutputAudioDelta {
@@ -135,8 +133,7 @@ pub fn parse_server_event(raw: &str) -> TranslationEvent {
 
         // ── Source-language transcript (primary: GA; secondary: legacy name) ──
         // SPEC: official field is `session.input_transcript.delta`.
-        "session.input_transcript.delta"
-        | "conversation.item.input_audio_transcription.delta" => {
+        "session.input_transcript.delta" | "conversation.item.input_audio_transcription.delta" => {
             TranslationEvent::InputTranscriptDelta {
                 text: delta_str(),
                 elapsed_ms: elapsed(&v),
@@ -145,13 +142,23 @@ pub fn parse_server_event(raw: &str) -> TranslationEvent {
 
         // ── Translated transcript (primary: GA; secondary: legacy name) ───────
         // SPEC: official field is `session.output_transcript.delta`.
-        "session.output_transcript.delta"
-        | "response.output_audio_transcript.delta" => {
+        "session.output_transcript.delta" | "response.output_audio_transcript.delta" => {
             TranslationEvent::OutputTranscriptDelta {
                 text: delta_str(),
                 elapsed_ms: elapsed(&v),
             }
         }
+
+        // ── Segment finalization (GA event names; legacy *.completed kept) ────
+        // NOTE: exact GA names are confirmed against a live connection during
+        // implementation; anything still unknown stays Ignored (no panic). The
+        // engine has a silence-gap + session-close fallback for finalization.
+        "session.input_transcript.done" | "session.input_transcript.completed" => {
+            TranslationEvent::InputTranscriptDone
+        }
+        "session.output_transcript.done"
+        | "session.output_transcript.completed"
+        | "response.output_audio_transcript.done" => TranslationEvent::OutputTranscriptDone,
 
         // ── Error ─────────────────────────────────────────────────────────────
         "error" => {
@@ -184,7 +191,7 @@ mod tests {
     /// No `session.audio.input` block (that would trigger GA type errors).
     #[test]
     fn session_update_matches_spec_8_3() {
-        let v = build_session_update("zh", "en");
+        let v = build_session_update("en");
         assert_eq!(v["type"], "session.update");
         // target language is present
         assert_eq!(v["session"]["audio"]["output"]["language"], "en");
@@ -198,7 +205,7 @@ mod tests {
 
     #[test]
     fn session_update_target_language_is_forwarded() {
-        let v = build_session_update("ja", "fr");
+        let v = build_session_update("fr");
         assert_eq!(v["session"]["audio"]["output"]["language"], "fr");
     }
 
@@ -226,9 +233,8 @@ mod tests {
     #[test]
     fn parses_session_output_audio_delta() {
         let b64 = pcm::pcm16_to_base64(&[100, -100, 32767]);
-        let raw = format!(
-            r#"{{"type":"session.output_audio.delta","delta":"{b64}","elapsed_ms":640}}"#
-        );
+        let raw =
+            format!(r#"{{"type":"session.output_audio.delta","delta":"{b64}","elapsed_ms":640}}"#);
         match parse_server_event(&raw) {
             TranslationEvent::OutputAudioDelta {
                 pcm16,
@@ -276,11 +282,15 @@ mod tests {
     #[test]
     fn parses_legacy_response_output_audio_delta() {
         let b64 = pcm::pcm16_to_base64(&[100, -100, 32767]);
-        let raw = format!(
-            r#"{{"type":"response.output_audio.delta","delta":"{b64}","elapsed_ms":640}}"#
-        );
+        let raw =
+            format!(r#"{{"type":"response.output_audio.delta","delta":"{b64}","elapsed_ms":640}}"#);
         match parse_server_event(&raw) {
-            TranslationEvent::OutputAudioDelta { pcm16, sample_rate, elapsed_ms, .. } => {
+            TranslationEvent::OutputAudioDelta {
+                pcm16,
+                sample_rate,
+                elapsed_ms,
+                ..
+            } => {
                 assert_eq!(pcm16, vec![100, -100, 32767]);
                 assert_eq!(sample_rate, 24000);
                 assert_eq!(elapsed_ms, Some(640));
@@ -305,14 +315,43 @@ mod tests {
     /// Legacy `conversation.item.input_audio_transcription.delta` still accepted.
     #[test]
     fn parses_legacy_input_transcript_delta() {
-        let raw =
-            r#"{"type":"conversation.item.input_audio_transcription.delta","delta":"你好"}"#;
+        let raw = r#"{"type":"conversation.item.input_audio_transcription.delta","delta":"你好"}"#;
         assert_eq!(
             parse_server_event(raw),
             TranslationEvent::InputTranscriptDelta {
                 text: "你好".into(),
                 elapsed_ms: None
             }
+        );
+    }
+
+    // ── segment finalization (done/completed events) ──────────────────────────
+
+    #[test]
+    fn parses_input_transcript_done() {
+        assert_eq!(
+            parse_server_event(r#"{"type":"session.input_transcript.done"}"#),
+            TranslationEvent::InputTranscriptDone
+        );
+        assert_eq!(
+            parse_server_event(r#"{"type":"session.input_transcript.completed"}"#),
+            TranslationEvent::InputTranscriptDone
+        );
+    }
+
+    #[test]
+    fn parses_output_transcript_done() {
+        assert_eq!(
+            parse_server_event(r#"{"type":"session.output_transcript.done"}"#),
+            TranslationEvent::OutputTranscriptDone
+        );
+        assert_eq!(
+            parse_server_event(r#"{"type":"response.output_audio_transcript.done"}"#),
+            TranslationEvent::OutputTranscriptDone
+        );
+        assert_eq!(
+            parse_server_event(r#"{"type":"session.output_transcript.completed"}"#),
+            TranslationEvent::OutputTranscriptDone
         );
     }
 

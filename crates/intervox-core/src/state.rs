@@ -39,6 +39,18 @@ pub enum Health {
     Error,
 }
 
+/// OpenAI translation-connection signal (spec §11, §13): what the UI shows for
+/// whether the OpenAI realtime translation session is actually up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationConn {
+    Idle,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
+}
+
 /// Lifecycle phases from the spec §11 state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +70,7 @@ pub enum Phase {
 pub struct AppStatus {
     pub mode: VirtualMicMode,
     pub health: Health,
+    pub translation: TranslationConn,
     pub source_mic_name: Option<String>,
     pub virtual_mic_installed: bool,
     pub openai_connected: bool,
@@ -72,6 +85,7 @@ impl Default for AppStatus {
         Self {
             mode: VirtualMicMode::Silence,
             health: Health::Ready,
+            translation: TranslationConn::Idle,
             source_mic_name: None,
             virtual_mic_installed: false,
             openai_connected: false,
@@ -123,6 +137,16 @@ impl AppState {
                 }
             }
         };
+        self.status.translation = match mode {
+            VirtualMicMode::Silence | VirtualMicMode::PassThrough => TranslationConn::Idle,
+            VirtualMicMode::Translate | VirtualMicMode::TranslateWithOriginal => {
+                if self.status.openai_connected {
+                    TranslationConn::Connected
+                } else {
+                    TranslationConn::Connecting
+                }
+            }
+        };
         self.phase
     }
 
@@ -134,6 +158,13 @@ impl AppState {
             } else {
                 Phase::ConnectingTranslation
             };
+            self.status.translation = if connected {
+                TranslationConn::Connected
+            } else {
+                TranslationConn::Reconnecting
+            };
+        } else {
+            self.status.translation = TranslationConn::Idle;
         }
     }
 
@@ -142,6 +173,18 @@ impl AppState {
             VirtualMicMode::TranslateWithOriginal => Phase::TranslatingWithOriginal,
             _ => Phase::Translating,
         }
+    }
+
+    /// Explicitly override the connection signal (used by the engine for a
+    /// fatal/auth failure that the supervisor will NOT retry).
+    pub fn set_translation_conn(&mut self, c: TranslationConn) {
+        debug_assert!(
+            self.status.mode.requires_openai()
+                || matches!(c, TranslationConn::Idle | TranslationConn::Failed),
+            "set_translation_conn called with {:?} while mode does not require OpenAI",
+            c
+        );
+        self.status.translation = c;
     }
 }
 
@@ -203,5 +246,34 @@ mod tests {
     fn silence_mode_phase() {
         let mut st = AppState::new();
         assert_eq!(st.transition(VirtualMicMode::Silence), Phase::Silence);
+    }
+
+    #[test]
+    fn translation_conn_default_is_idle() {
+        assert_eq!(AppStatus::default().translation, TranslationConn::Idle);
+    }
+
+    #[test]
+    fn transition_sets_translation_conn() {
+        let mut st = AppState::new();
+        st.transition(VirtualMicMode::Translate);
+        assert_eq!(st.status.translation, TranslationConn::Connecting);
+        st.mark_openai_connected(true);
+        assert_eq!(st.status.translation, TranslationConn::Connected);
+        st.transition(VirtualMicMode::PassThrough);
+        assert_eq!(st.status.translation, TranslationConn::Idle);
+        st.transition(VirtualMicMode::Silence);
+        assert_eq!(st.status.translation, TranslationConn::Idle);
+    }
+
+    #[test]
+    fn set_translation_conn_failed_is_explicit() {
+        let mut st = AppState::new();
+        st.transition(VirtualMicMode::Translate);
+        st.set_translation_conn(TranslationConn::Failed);
+        assert_eq!(st.status.translation, TranslationConn::Failed);
+        // mark_openai_connected(false) while in translate => Reconnecting
+        st.mark_openai_connected(false);
+        assert_eq!(st.status.translation, TranslationConn::Reconnecting);
     }
 }

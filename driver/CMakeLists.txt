@@ -22,3 +22,13 @@ set_target_properties(Intervox PROPERTIES
 target_link_libraries(Intervox PRIVATE
     "-framework CoreAudio"
     "-framework CoreFoundation")
+
+enable_testing()
+
+add_executable(driver_property_contract tests/property_contract.c)
+target_include_directories(driver_property_contract PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_options(driver_property_contract PRIVATE -Wall -Wextra)
+target_link_libraries(driver_property_contract PRIVATE
+    "-framework CoreAudio"
+    "-framework CoreFoundation")
+add_test(NAME driver_property_contract COMMAND driver_property_contract)

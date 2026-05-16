@@ -1,6 +1,6 @@
 # Intervox Implementation Status
 
-Snapshot: 2026-05-16.
+Snapshot: 2026-05-17.
 
 This is the active repository status document. Older planning/spec files were
 removed because they mixed target architecture, historical task plans, and
@@ -18,8 +18,10 @@ The current codebase has a verified Rust core, a verified CoreAudio HAL virtual
 microphone driver, and a Svelte/Tauri UI shell. The live integration that
 captures microphone audio, calls OpenAI Realtime, writes translated audio into
 the shared ring buffer, and reflects real driver/device state in the app is code
-complete and automated-test verified. End-to-end product acceptance (audible
-output in meeting apps, quit/restart behavior, log privacy) is pending manual
+complete and automated-test verified. The frontend real-wiring pass replaced
+fake/dead UI controls with backend signals, persisted local state, and visible
+action feedback. End-to-end product acceptance (audible output in meeting apps,
+quit/restart behavior, log privacy) is pending manual
 verification via `docs/RUNBOOK-acceptance.md` (steps A1–A12).
 
 ## Current Layout
@@ -33,6 +35,8 @@ src-tauri/             Tauri v2 shell and command surface.
 src/                   Svelte 5 frontend.
 docs/STATUS.md         Active implementation status and checklist.
 docs/RUNBOOK-acceptance.md  Manual acceptance steps A1–A12 (requires real key + mic).
+docs/ARCHITECTURE.md   Durable runtime architecture and invariants.
+docs/DEVELOPMENT.md    Local setup, driver lifecycle, and verification commands.
 ```
 
 ## Verified Complete
@@ -52,9 +56,16 @@ docs/RUNBOOK-acceptance.md  Manual acceptance steps A1–A12 (requires real key 
 | Frontend/Tauri seam | Svelte components go through `src/lib/store.svelte.ts` and typed Tauri wrappers in `src/lib/tauri.ts`. |
 | Honest idle UI | With no live capture/OpenAI events, VU meters sit at 0, latency renders as empty/unknown, and captions do not fabricate transcript text. |
 | Config persistence | Config saved to app-data via `tauri::path::app_data_dir`; hydrated on startup. |
-| Keychain secret storage | BYOK key stored in macOS Keychain (`security` CLI); never written to disk plaintext or logs. |
+| Local BYOK storage | BYOK key stored in the Intervox config file under app-data with user-only file permissions; never written to logs. |
+| Translation connection signal | `AppStatus.translation` is driven by mode transitions and OpenAI Realtime events; sidebar chip and Status pane share it. |
+| Local usage accounting | 24 kHz PCM16 samples successfully sent to OpenAI are folded into `usage.json`; Account pane shows current-month and lifetime estimates. |
+| Transcript history | Finalized source/target transcript segments are saved as per-session local JSONL files when enabled; audio bytes are never stored. |
+| Connection log | A 200-entry in-memory ring plus capped `connection.log` records lifecycle events without transcript text, audio bytes, or keys. |
+| UI config and native integration | `Config.ui` drives menu-bar latency badge, launch-at-login LaunchAgent, and Dock-icon visibility. |
+| External links and version display | HTTPS-only `open_external_url` backs OpenAI links; frontend reads the real Tauri app version instead of hardcoded build strings. |
+| Action feedback | State-changing actions route through non-blocking toasts for success/failure feedback. |
 | Real microphone permission | `AVCaptureDevice` authorization queried and reflected in `MicPermissionStatus` enum. |
-| Real driver detection | `kextstat`/`system_profiler` query surfaces driver installed/running/stale states. |
+| Real driver detection | Filesystem install state is cheap; CoreAudio visibility is derived from the app's bounded CPAL device snapshot. |
 | In-app driver install/update/uninstall | Privileged osascript-wrapped install and uninstall wired to Tauri commands. |
 | Real device enumeration | CPAL-backed `get_audio_devices` replaces mock; permission-aware errors returned. |
 | Native tray/menubar | Mode CheckMenuItems, Show Window, Captions, and Quit implemented via Tauri tray API. |
@@ -66,7 +77,7 @@ docs/RUNBOOK-acceptance.md  Manual acceptance steps A1–A12 (requires real key 
 | OpenAI Realtime connection | BYOK WebSocket session with exponential-backoff reconnect; session.update sent on connect. |
 | Translate path | Mic → 24 kHz PCM16 → WebSocket uplink → translated audio delta → jitter buffer → resample 48 kHz → limiter → ring. |
 | TranslateWithOriginal path | Translate path plus delayed original mixed under translated audio. |
-| Transcript events | Source and target transcript deltas forwarded to frontend via `transcript-updated` event. |
+| Transcript events | Source and target transcript deltas forwarded to frontend via dedicated transcript events; completion events finalize saved segments. |
 | Latency events | Round-trip latency computed and emitted via `latency-updated` event. |
 | Silence mode enforcement | OpenAI session torn down in Silence and PassThrough; no original leakage in Translate. |
 | Virtual mic available after quit | Ring buffer mode set to Silence on app exit; driver continues to serve silence. |
@@ -76,103 +87,66 @@ All previously-partial areas are now complete; see the checklist and Verified Co
 
 ## Verified Commands
 
-Full automated suite run — 2026-05-16:
+Latest automated suite run — 2026-05-17:
 
 ```text
 cargo test --workspace
 
-  Running unittests src/lib.rs (intervox_core)
-  running 91 tests
-  test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+  intervox-cli: 0 tests passed
+  intervox-core: 115 tests passed
+  intervox-core doc-tests: 0 tests passed
+```
 
-  Running unittests src/main.rs (intervox-cli)
-  running 0 tests
-  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```text
+cargo test --manifest-path src-tauri/Cargo.toml
 
-  Finished `test` profile [unoptimized + debuginfo] target(s)
+  intervox-tauri-lib: 86 passed; 0 failed; 6 ignored
+  intervox-tauri: 0 tests passed
+  intervox-tauri-lib doc-tests: 0 tests passed
 ```
 
 ```text
 cargo clippy --workspace -- -D warnings
 
-  Finished `dev` profile [unoptimized + debuginfo] target(s)   ← clean, 0 warnings
+  Finished clean, 0 warnings.
 ```
 
 ```text
-cargo run -p intervox-cli -- selfcheck
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
-  PASS  config default version 1
-  PASS  config mix default 15%
-  PASS  percent<->db round trip
-  PASS  translate needs openai
-  PASS  passthrough no openai
-  PASS  silence: vmic silent + no openai
-  PASS  passthrough: no openai cost
-  PASS  translate: no original leak
-  PASS  resample halves count
-  PASS  resample preserves 1kHz
-  PASS  original quieter than translated
-  PASS  limiter caps below full scale
-  PASS  meter rms ~0.707 for sine
-  PASS  ringbuffer round trip
-  PASS  ringbuffer underrun -> silence
-  PASS  session.update spec 8.3
-  PASS  parse session.updated
-  PASS  latency display
-  PASS  error recovery command
-
-  19 passed, 0 failed
-```
-
-```text
-cd src-tauri && cargo build
-
-  Compiling intervox-tauri v0.1.0
-  Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.60s
-```
-
-```text
-cd src-tauri && cargo clippy -- -D warnings
-
-  Finished `dev` profile [unoptimized + debuginfo] target(s)   ← clean, 0 warnings
-```
-
-```text
-cd src-tauri && cargo test --lib
-
-  running 80 tests
-  test result: ok. 74 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.53s
-
-  (6 ignored = hardware/keychain tests that require real devices or a logged-in keychain;
-   all logic-level tests pass)
+  Finished clean, 0 warnings.
 ```
 
 ```text
 pnpm test
 
   Test Files  8 passed (8)
-       Tests  35 passed (35)
-    Duration  1.07s
+       Tests  51 passed (51)
 ```
 
 ```text
 pnpm check
 
-  COMPLETED 248 FILES  0 ERRORS  0 WARNINGS  0 FILES_WITH_PROBLEMS
+  svelte-check found 0 errors and 0 warnings
 ```
 
 ```text
 pnpm build
 
-  ✓ 158 modules transformed.
-  dist/assets/main-2oQA8z_R.js      147.32 kB │ gzip: 40.47 kB
-  ✓ built in 536ms
+  ✓ 162 modules transformed.
+  ✓ built in 760ms
+```
+
+```text
+git diff --check
+
+  no whitespace errors
 ```
 
 Installed local driver verification (from initial driver acceptance run):
 
 ```text
-system_profiler SPAudioDataType                Intervox visible, 1 input channel, 48 kHz, Virtual
+App bounded device refresh                     Intervox visible as an input device
 codesign --verify --strict --deep              valid on disk
 spctl -a -t install -vv                        accepted, source=Notarized Developer ID
 xcrun stapler validate                         validate action worked
@@ -183,8 +157,8 @@ xcrun stapler validate                         validate action worked
 Code is complete and the full automated suite is green (see Verified Commands above).
 
 End-to-end product acceptance — whether translated audio is audible in Zoom/Meet/QuickTime,
-whether quit/restart behavior is correct, and whether logs contain no raw audio or key
-material — requires a human operator with a real OpenAI API key, a microphone, and the
+whether quit/restart behavior is correct, and whether runtime logs contain no raw audio,
+transcript text, or key material — requires a human operator with a real OpenAI API key, a microphone, and the
 meeting applications installed. Those checks are codified as steps A1–A12 in
 `docs/RUNBOOK-acceptance.md`. The `## Product Acceptance` items below are checked by the
 operator after completing the runbook; they are NOT checked here.
@@ -253,6 +227,14 @@ operator after completing the runbook; they are NOT checked here.
 - [x] Load persisted config on startup.
 - [x] Store BYOK key securely.
 - [x] Replace key-shape check with real OpenAI auth validation or a clear offline-only state.
+- [x] Show current-month and lifetime local usage estimates.
+- [x] Persist transcript history as local per-session JSONL when enabled.
+- [x] Clear saved transcript files and live session transcript state from the UI.
+- [x] Surface the connection log in the Advanced pane.
+- [x] Persist and apply UI config for latency badge, launch-at-login, and Dock visibility.
+- [x] Open OpenAI account/API-key links through the HTTPS-only native command.
+- [x] Display the real app version from Tauri.
+- [x] Show non-blocking feedback toasts for user-triggered mutations.
 - [x] Replace mock device list with real devices.
 - [x] Reflect real microphone permission status.
 - [x] Reflect real driver install/runtime status.
@@ -296,7 +278,7 @@ Check each box only after completing the corresponding runbook step.
 - [ ] Captions show live source and target text. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A5)
 - [ ] App quit keeps virtual mic device available and silent. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A6)
 - [ ] Driver restart and app restart recover without manual cleanup. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A7)
-- [ ] No raw audio or transcripts are logged by default. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A8)
+- [ ] Runtime logs contain no raw audio, transcript text, or keys; transcript history files are local/user-controlled. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A8)
 - [ ] BYOK key is never written to logs. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A9)
 - [ ] Zoom smoke test passes. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A10)
 - [ ] Google Meet smoke test passes. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A11)
@@ -312,8 +294,11 @@ There are no genuinely out-of-scope or deferred features at this time.
 
 ## Documentation Policy
 
-- Keep `docs/STATUS.md` as the only active status and checklist document until
-  a broader documentation system is intentionally added.
+- Keep `README.md` as the project entry point.
+- Keep durable architecture in `docs/ARCHITECTURE.md`.
+- Keep local setup and command workflows in `docs/DEVELOPMENT.md`.
+- Keep `docs/STATUS.md` as the active status and checklist document.
+- Keep real-hardware acceptance in `docs/RUNBOOK-acceptance.md`.
 - Do not reintroduce historical planning docs as active instructions.
 - If a design or spec decision changes, update this file in the same change as
   the implementation or explicitly mark it as planned.

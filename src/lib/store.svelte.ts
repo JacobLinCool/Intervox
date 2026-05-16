@@ -9,6 +9,8 @@ import {
 } from "./constants";
 import type { UiMode, UiLatency, Quality, LangCtx } from "./constants";
 
+const AUDIO_INPUT_DETECTED_RMS = 0.0001;
+
 // ────────────────────────────────────────────────────────────
 // Pure helpers (exported so tests can import them directly)
 // ────────────────────────────────────────────────────────────
@@ -33,6 +35,29 @@ export function indicatorState(
         : "mixed";
 }
 
+export type ChipView = { tone: "ok" | "warn" | "error" | "neutral"; text: string };
+
+export function connectionChip(
+  mode: UiMode,
+  conn: "idle" | "connecting" | "connected" | "reconnecting" | "failed",
+  latencyText: string,
+  errorTitle: string | null,
+): ChipView {
+  if (mode === "silence") return { tone: "neutral", text: "Translation off" };
+  if (mode === "pass") return { tone: "neutral", text: "Pass-through · no translation" };
+  switch (conn) {
+    case "connected":
+      return { tone: "ok", text: `Translating · connected · ${latencyText}` };
+    case "idle":
+    case "connecting":
+      return { tone: "warn", text: "Connecting to OpenAI…" };
+    case "reconnecting":
+      return { tone: "warn", text: "Reconnecting…" };
+    case "failed":
+      return { tone: "error", text: errorTitle ?? "Translation disconnected" };
+  }
+}
+
 // ────────────────────────────────────────────────────────────
 // Rune-based reactive store
 // ────────────────────────────────────────────────────────────
@@ -48,6 +73,10 @@ class Store {
     maskedKey: null,
     lastVerified: null,
     usageUsd: 0,
+    monthMinutes: 0,
+    monthUsd: 0,
+    totalMinutes: 0,
+    totalUsd: 0,
   });
 
   micPermission: MicPermission = $state("notDetermined");
@@ -57,6 +86,7 @@ class Store {
   tgtText: string = $state("");
   inputLevel: number = $state(0);
   outputLevel: number = $state(0);
+  audioInputDetected: boolean = $state(false);
   lastError: AppError | null = $state(null);
   sourceDetected: boolean = $state(false);
 
@@ -72,22 +102,29 @@ class Store {
   theme: "light" | "dark" = $state("light");
   wallpaper: string = $state("lavender");
 
+  // App version
+  appVersion: string = $state("");
+
+  // Toast queue
+  toasts: { id: number; kind: "success" | "error"; text: string }[] = $state([]);
+  private toastSeq = 0;
+
   private unlisten: UnlistenFn[] = [];
+  private meterTimer: ReturnType<typeof setInterval> | null = null;
+  private meterSyncBusy = false;
 
   // ── Lifecycle ──────────────────────────────────────────────
 
   async init(): Promise<void> {
     try {
-      const [status, devices, config, account, micPermission, driverState] = await Promise.all([
+      const [status, config, account, micPermission, driverState] = await Promise.all([
         cmd.getAppStatus(),
-        cmd.getAudioDevices(),
         cmd.getConfig(),
         cmd.getAccountStatus(),
         cmd.getMicPermission(),
         cmd.getDriverState(),
       ]);
       this.status = status;
-      this.devices = devices;
       this.config = config;
       this.account = account;
       this.micPermission = micPermission;
@@ -103,14 +140,23 @@ class Store {
       // leave honest defaults otherwise
     }
 
+    try { this.appVersion = await cmd.appVersion(); } catch {}
+
+    void this.refreshDevices();
+    this.startMeterSync();
+
     // Subscribe to events — push unlisten fns
     this.unlisten.push(await on.status((s) => {
       this.status = s;
       // Honest idle: clear transcripts when mode is not translating.
       if (s.mode === "silence" || s.mode === "pass_through") this.clearTranscripts();
     }));
-    this.unlisten.push(await on.inputLevel((v) => { this.inputLevel = v; }));
-    this.unlisten.push(await on.outputLevel((v) => { this.outputLevel = v; }));
+    this.unlisten.push(await on.inputLevel((v) => {
+      this.applyLevels(v, this.outputLevel);
+    }));
+    this.unlisten.push(await on.outputLevel((v) => {
+      this.applyLevels(this.inputLevel, v);
+    }));
     this.unlisten.push(await on.latency((v) => {
       if (this.status) this.status = { ...this.status, latencyMs: v };
     }));
@@ -127,15 +173,19 @@ class Store {
     }));
     this.unlisten.push(await on.devices((d) => { this.devices = d; }));
     this.unlisten.push(await on.error((e) => { this.lastError = e; }));
-    // transcript-cleared: reset in-session transcript buffers.
-    // There is no on-disk transcript history (privacy.save_transcript_history
-    // defaults false), so "clear" means zeroing the live session buffers only.
+    // transcript-cleared: the Rust clear_transcript_history command has already
+    // ended the active session log and deleted the on-disk JSONL files; this
+    // listener just zeroes the live in-session buffers so the UI reflects it.
     this.unlisten.push(await on.transcriptCleared(() => { this.clearTranscripts(); }));
   }
 
   dispose(): void {
     for (const fn of this.unlisten) fn();
     this.unlisten = [];
+    if (this.meterTimer) {
+      clearInterval(this.meterTimer);
+      this.meterTimer = null;
+    }
   }
 
   // ── Derived getters ────────────────────────────────────────
@@ -167,12 +217,16 @@ class Store {
   }
 
   get targetLang() {
-    const code = this.status?.targetLanguage ?? this.config?.translation.target_language;
+    const code = this.config?.translation.target_language ?? this.status?.targetLanguage;
     return ALL_LANGS.find((l) => l.code === code) ?? ALL_LANGS[0];
   }
 
   get sourceLang() {
-    return SOURCE_LANGS.find((l) => l.code === this.config?.translation.source_language) ?? SOURCE_LANGS[0];
+    // The OpenAI realtime translation endpoint auto-detects the source
+    // language; there is no user-facing selector. Always report auto-detect
+    // so the language-pair status text stays honest regardless of any stale
+    // `config.translation.source_language` value.
+    return SOURCE_LANGS[0];
   }
 
   get langCtx(): LangCtx {
@@ -207,6 +261,14 @@ class Store {
 
   // ── Actions ────────────────────────────────────────────────
 
+  pushToast(kind: "success" | "error", text: string): void {
+    const id = ++this.toastSeq;
+    this.toasts = [...this.toasts, { id, kind, text }];
+    setTimeout(() => {
+      this.toasts = this.toasts.filter((t) => t.id !== id);
+    }, 3000);
+  }
+
   private async tryCmd(fn: () => Promise<unknown>): Promise<boolean> {
     try {
       await fn();
@@ -219,19 +281,44 @@ class Store {
     }
   }
 
+  private applyLevels(inputLevel: number, outputLevel: number): void {
+    this.inputLevel = inputLevel;
+    this.outputLevel = outputLevel;
+    if (inputLevel >= AUDIO_INPUT_DETECTED_RMS) this.audioInputDetected = true;
+  }
+
+  private startMeterSync(): void {
+    if (this.meterTimer) return;
+    const sync = async () => {
+      if (this.meterSyncBusy) return;
+      this.meterSyncBusy = true;
+      try {
+        const levels = await cmd.getAudioLevels();
+        this.applyLevels(levels.inputLevel, levels.outputLevel);
+      } catch {
+        // Event listeners still carry errors; meter sync is read-only.
+      } finally {
+        this.meterSyncBusy = false;
+      }
+    };
+    void sync();
+    this.meterTimer = setInterval(sync, 125);
+  }
+
   async setMode(m: UiMode): Promise<void> {
     const ok = await this.tryCmd(() => cmd.setMode(modeToBackend(m)));
-    if (ok && (m === "silence" || m === "pass")) this.clearTranscripts();
+    if (ok) {
+      await this.refreshStatus();
+      if (this.config) this.config.audio.virtual_mic_mode = modeToBackend(m);
+      if (m === "silence" || m === "pass") this.clearTranscripts();
+    }
   }
 
   async setTargetLang(code: string): Promise<void> {
-    await this.tryCmd(() => cmd.setTargetLanguage(code));
+    const ok = await this.tryCmd(() => cmd.setTargetLanguage(code));
+    if (!ok) return;
     if (this.config) this.config.translation.target_language = code;
-  }
-
-  async setSourceLang(code: string): Promise<void> {
-    await this.tryCmd(() => cmd.setSourceLanguage(code));
-    if (this.config) this.config.translation.source_language = code;
+    if (this.status) this.status = { ...this.status, targetLanguage: code };
   }
 
   async setSourceMic(id: string): Promise<void> {
@@ -261,7 +348,8 @@ class Store {
   async setPrivacy(patch: Partial<Config["privacy"]>): Promise<void> {
     if (!this.config) return;
     this.config.privacy = { ...this.config.privacy, ...patch };
-    await this.tryCmd(() => cmd.setPrivacyConfig(this.config!.privacy));
+    const ok = await this.tryCmd(() => cmd.setPrivacyConfig(this.config!.privacy));
+    this.pushToast(ok ? "success" : "error", ok ? "Privacy setting saved" : "Couldn't save setting");
   }
 
   async setShortcuts(s: Config["shortcuts"]): Promise<void> {
@@ -272,10 +360,12 @@ class Store {
   async setApiKey(k: string): Promise<void> {
     try {
       this.account = await cmd.setApiKey(k);
+      this.pushToast("success", "API key saved");
     } catch (e: unknown) {
       if (e && typeof e === "object" && "code" in e && "message" in e) {
         this.lastError = e as AppError;
       }
+      this.pushToast("error", "Couldn't save the key");
     }
   }
 
@@ -297,22 +387,41 @@ class Store {
       maskedKey: null,
       lastVerified: null,
       usageUsd: 0,
+      monthMinutes: 0,
+      monthUsd: 0,
+      totalMinutes: 0,
+      totalUsd: 0,
     };
+    this.pushToast("success", "API key removed");
   }
 
   async installVirtualMic(): Promise<void> {
-    await this.tryCmd(() => cmd.installVirtualMic());
+    const ok = await this.tryCmd(() => cmd.installVirtualMic());
+    await this.refreshStatus();
     await this.refreshDriverState();
+    this.pushToast(ok ? "success" : "error", ok ? "Driver installed" : "Couldn't install driver");
   }
 
   async updateVirtualMic(): Promise<void> {
-    await this.tryCmd(() => cmd.updateVirtualMic());
+    const ok = await this.tryCmd(() => cmd.updateVirtualMic());
+    await this.refreshStatus();
     await this.refreshDriverState();
+    this.pushToast(ok ? "success" : "error", ok ? "Driver updated" : "Couldn't update driver");
   }
 
   async uninstallVirtualMic(): Promise<void> {
-    await this.tryCmd(() => cmd.uninstallVirtualMic());
+    const ok = await this.tryCmd(() => cmd.uninstallVirtualMic());
+    await this.refreshStatus();
     await this.refreshDriverState();
+    this.pushToast(ok ? "success" : "error", ok ? "Driver uninstalled" : "Couldn't uninstall driver");
+  }
+
+  async refreshStatus(): Promise<void> {
+    try {
+      this.status = await cmd.getAppStatus();
+    } catch {
+      // leave existing value
+    }
   }
 
   async refreshDriverState(): Promise<void> {
@@ -323,16 +432,44 @@ class Store {
     }
   }
 
+  async refreshDevices(): Promise<void> {
+    try {
+      this.devices = await cmd.getAudioDevices();
+      await this.refreshStatus();
+      await this.refreshDriverState();
+    } catch {
+      // leave existing value
+    }
+  }
+
   async openAudioMidiSetup(): Promise<void> {
     await this.tryCmd(() => cmd.openAudioMidiSetup());
   }
 
   async openMicPermission(): Promise<void> {
-    await this.tryCmd(() => cmd.openMicPermissionSettings());
+    try {
+      this.micPermission = await cmd.openMicPermissionSettings();
+    } catch (e: unknown) {
+      if (e && typeof e === "object" && "code" in e && "message" in e) {
+        this.lastError = e as AppError;
+      }
+    }
   }
 
   async openAccessibilitySettings(): Promise<void> {
     await this.tryCmd(() => cmd.openAccessibilitySettings());
+  }
+
+  async requestMicPermission(): Promise<MicPermission> {
+    try {
+      this.micPermission = await cmd.requestMicPermission();
+      return this.micPermission;
+    } catch (e: unknown) {
+      if (e && typeof e === "object" && "code" in e && "message" in e) {
+        this.lastError = e as AppError;
+      }
+      throw e;
+    }
   }
 
   async refreshMicPermission(): Promise<void> {
@@ -345,6 +482,19 @@ class Store {
 
   async startTest(): Promise<void> {
     await this.tryCmd(() => cmd.startTestPhrase());
+  }
+
+  resetAudioInputDetection(): void {
+    this.audioInputDetected = false;
+  }
+
+  async startMicLevelProbe(): Promise<void> {
+    await this.tryCmd(() => cmd.startMicLevelProbe());
+  }
+
+  async stopMicLevelProbe(): Promise<void> {
+    const ok = await this.tryCmd(() => cmd.stopMicLevelProbe());
+    if (ok) this.inputLevel = 0;
   }
 
   async stopAll(): Promise<void> {
@@ -365,10 +515,38 @@ class Store {
   }
 
   async clearHistory(): Promise<void> {
-    // Calls clear_transcript_history on the backend, which emits
-    // "transcript-cleared".  The on.transcriptCleared listener in init()
-    // then calls clearTranscripts() to zero the live session buffers.
-    await this.tryCmd(() => cmd.clearTranscriptHistory());
+    try {
+      const n = await cmd.clearTranscriptHistory();
+      this.pushToast(
+        "success",
+        n > 0 ? `Cleared ${n} saved transcript${n === 1 ? "" : "s"}` : "Cleared session transcript",
+      );
+    } catch (e: unknown) {
+      this.pushToast("error", "Couldn't clear transcripts");
+      if (e && typeof e === "object" && "code" in e && "message" in e) {
+        this.lastError = e as AppError;
+      }
+    }
+  }
+
+  async setUiConfig(patch: Partial<Config["ui"]>): Promise<void> {
+    if (!this.config) return;
+    this.config.ui = { ...this.config.ui, ...patch };
+    const ok = await this.tryCmd(() => cmd.setUiConfig(this.config!.ui));
+    this.pushToast(ok ? "success" : "error", ok ? "Setting saved" : "Couldn't save setting");
+  }
+
+  async openExternalUrl(url: string): Promise<void> {
+    const ok = await this.tryCmd(() => cmd.openExternalUrl(url));
+    if (!ok) this.pushToast("error", "Couldn't open the link");
+  }
+
+  async loadConnectionLog(): Promise<{ ts: string; kind: string; detail: string }[]> {
+    try {
+      return await cmd.getConnectionLog();
+    } catch {
+      return [];
+    }
   }
 
   dismissError(): void {

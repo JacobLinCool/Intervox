@@ -6,7 +6,7 @@
 - A real OpenAI API key (BYOK) that incurs billable API usage.
 - A physical microphone and human ears.
 - Installed meeting apps (Zoom, Google Meet in a browser, QuickTime Player).
-- Administrator access to install a kernel-extension-class audio driver.
+- Administrator access to install a CoreAudio HAL driver.
 - A person speaking into the mic and listening to what a meeting participant hears.
 
 None of these can be emulated by a CI pipeline. Automated test suites (cargo test, pnpm test) cover unit and integration paths; this runbook covers end-to-end product correctness.
@@ -25,7 +25,7 @@ Before beginning, confirm everything on this list is available on the test Mac:
 | `pnpm` | `pnpm --version` must succeed |
 | `cmake` and `ninja` | Required by `scripts/build_driver.sh` |
 | Apple Developer ID Application certificate | Required by `scripts/sign_driver.sh`. The identity embedded in `scripts/driver_env.sh` is `Developer ID Application: JHEN-KE LIN (5H75SGA7KP)`. If you are testing on a different signing identity, set `SIGN_IDENTITY` in the environment before running the sign script. |
-| Apple notarytool keychain profile named `intervox-notary` | Required by `scripts/notarize_driver.sh`. Create once with: `xcrun notarytool store-credentials intervox-notary --apple-id <id> --team-id 5H75SGA7KP --password <app-specific-pw>`. If notarization was already done for the current driver build (and the bundle on disk is stapled), this step may be skipped and you can go directly to install. |
+| Apple notarytool credentials profile named `intervox-notary` | Required by `scripts/notarize_driver.sh`. Create once with: `xcrun notarytool store-credentials intervox-notary --apple-id <id> --team-id 5H75SGA7KP --password <app-specific-pw>`. If notarization was already done for the current driver build (and the bundle on disk is stapled), this step may be skipped and you can go directly to install. |
 | Administrator password | Required by `scripts/install_driver.sh` (runs `sudo`) and by the in-app "Install Driver" button. |
 | OpenAI API key (BYOK) | Must start with `sk-`. Cost is incurred during acceptance testing. |
 | Physical microphone | Built-in or USB; must be selectable in System Settings > Sound. |
@@ -94,23 +94,19 @@ Leave this terminal open for the duration of testing. All app output (stdout + s
 2. If the "Translator Mic installed" row shows a warning icon, a **Driver Recovery** card appears at the bottom of the Status pane with an **Install Driver** button.
 3. Click **Install Driver**. A macOS administrator password prompt appears.
 4. Enter the admin password. The app calls `scripts/install_driver.sh` via `osascript` with `INTERVOX_ASSUME_YES=1`, which runs `sudo cp`, `sudo chown`, and `sudo killall coreaudiod`. All audio on the machine is briefly interrupted.
-5. After ~2 seconds, the Status pane's "Translator Mic installed" row should show a green checkmark.
+5. After ~2 seconds, click the app's bounded device refresh or reopen the Status pane. The "Translator Mic installed" row should show a green checkmark once CoreAudio exposes the device.
 
-**Manual fallback (if the in-app button is not available):**
+**Manual install path:**
 
 ```bash
 INTERVOX_ASSUME_YES=1 sudo bash scripts/install_driver.sh
 ```
 
-Enter the admin password when prompted. The script prints `OK: 'Intervox' input device is registered.` on success.
+Enter the admin password when prompted. The script verifies the installed bundle and intentionally does not run `system_profiler`; device enumeration stays inside the app's bounded refresh path.
 
 **Verify the driver is visible:**
 
-```bash
-system_profiler SPAudioDataType | grep -A3 Intervox
-```
-
-Expected output includes `Intervox`, `1 ch`, `48000 Hz`, and `Virtual`.
+Use **Open Audio MIDI Setup** from Intervox, or use the Status pane's device refresh. Avoid `system_profiler SPAudioDataType` during driver bring-up because it can block inside CoreAudio when a HAL plug-in is unhealthy.
 
 ### Step S7 — Enter and verify the BYOK key
 
@@ -123,11 +119,11 @@ Expected output includes `Intervox`, `1 ch`, `48000 Hz`, and `Virtual`.
 
 ### Step S8 — Select "Translator Mic" in each meeting app
 
-Before running each app-specific smoke test (steps A10–A12), select the Intervox virtual microphone as the audio input in that app:
+Before running each app-specific smoke test (steps A10–A12), select the Intervox virtual microphone as the audio input in that app. Product UI calls it **Translator Mic**; CoreAudio may expose the device name as **Intervox**.
 
-- **Zoom:** Settings > Audio > Microphone > select **Translator Mic**.
-- **Google Meet:** gear icon > Audio > Microphone > select **Translator Mic**.
-- **QuickTime Player:** File > New Audio Recording > microphone selector (the dropdown arrow next to the record button) > select **Translator Mic**.
+- **Zoom:** Settings > Audio > Microphone > select **Translator Mic** or **Intervox**.
+- **Google Meet:** gear icon > Audio > Microphone > select **Translator Mic** or **Intervox**.
+- **QuickTime Player:** File > New Audio Recording > microphone selector (the dropdown arrow next to the record button) > select **Translator Mic** or **Intervox**.
 
 ---
 
@@ -181,7 +177,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 **Action.**
 1. Select the **Translate** mode card (label: "Translate — Only translated speech is sent.") or the tray item **Translate**.
-2. In the **Translation** pane, confirm the source language matches the language you will speak and the target language is the intended output.
+2. In the **Translation** pane, confirm the target language is the intended output (the source language is auto-detected by the endpoint — there is no source selector).
 3. Speak a sentence in the source language.
 4. Listen to what the meeting app receives. It should be in the target language only.
 
@@ -287,7 +283,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 ---
 
-### A8 — No raw audio or transcripts are logged by default
+### A8 — Runtime logs contain no raw audio, transcript text, or keys
 
 **Action.**
 1. Use the log file captured in Step S5: `/tmp/intervox-acceptance.log`.
@@ -304,14 +300,46 @@ grep -E "data:audio|audio/pcm|[A-Za-z0-9+/]{50,}={0,2}" /tmp/intervox-acceptance
 grep -i "transcript.*:" /tmp/intervox-acceptance.log
 ```
 
-3. Review any hits. Log lines like `[realtime] connect error` or `[engine] failed to start capture: ...` are acceptable. Lines that contain the literal text of spoken phrases, base64-encoded audio payloads, or raw transcript content are failures.
+3. Also inspect the connection lifecycle log, if it exists:
+
+```bash
+CONN_LOG="$HOME/Library/Application Support/app.intervox.desktop/connection.log"
+test ! -f "$CONN_LOG" || grep -i "hello\|你好\|this is a test\|sk-" "$CONN_LOG"
+```
+
+4. Confirm transcript history is treated as local user data rather than a runtime log:
+
+```bash
+find "$HOME/Library/Application Support/app.intervox.desktop/transcripts" -type f -name '*.jsonl' -print 2>/dev/null
+```
+
+Transcript JSONL files may exist when **Save transcript history** is enabled,
+which is the default. They intentionally contain finalized source/target
+transcript text, must be mode `600`, and must be removable through **Privacy** or
+**Advanced** > **Clear history**.
+
+5. Review any hits. Log lines like `[realtime] connect error`, lifecycle entries
+such as `connected target=en`, or `[engine] failed to start capture: ...` are
+acceptable. Lines in runtime logs that contain the literal text of spoken
+phrases, base64-encoded audio payloads, raw transcript content, or API keys are
+failures.
 
 **Expected observation.**
-- The `grep` commands return no lines containing spoken transcript content.
-- The `grep` commands return no lines containing audio payloads or base64 blobs.
-- Code-path labels (`[realtime]`, `[capture]`, `[engine]`) appear only with structural error descriptions, not with audio content.
+- The runtime-log `grep` commands return no lines containing spoken transcript
+  content.
+- The runtime-log `grep` commands return no lines containing audio payloads or
+  base64 blobs.
+- `connection.log` contains only lifecycle metadata and no transcript text,
+  audio payloads, or keys.
+- Local transcript JSONL files exist only under the app-data `transcripts/`
+  directory when transcript history is enabled, with user-only permissions.
+- Code-path labels (`[realtime]`, `[capture]`, `[engine]`) appear only with
+  structural error descriptions, not with audio content.
 
-**PASS criterion.** None of the grep commands above produce output that contains actual spoken words, audio bytes, or transcript text. Structural error messages (URLs, error codes, retry counts) are acceptable.
+**PASS criterion.** Runtime logs and `connection.log` contain no actual spoken
+words, audio bytes, transcript text, or API keys. Any transcript text appears
+only in user-controlled local transcript JSONL files when transcript history is
+enabled.
 
 - [ ] **A8 PASS**
 
@@ -335,9 +363,9 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 
 **Expected observation.**
 - Both greps return no output (empty result).
-- The key is stored only in the macOS Keychain and is never written to stdout, stderr, or any file in the process's working directory.
+- The key is stored only in the local Intervox config file, which should be user-readable/writable only (`600`), and is never written to stdout, stderr, or any log file.
 
-**PASS criterion.** `grep -i 'sk-' /tmp/intervox-acceptance.log` returns nothing. The log file contains no fragment of the OpenAI API key.
+**PASS criterion.** `grep -i 'sk-' /tmp/intervox-acceptance.log` returns nothing. The log file contains no fragment of the OpenAI API key, and `stat -f %Lp "$HOME/Library/Application Support/app.intervox.desktop/config.json"` returns `600`.
 
 - [ ] **A9 PASS**
 
@@ -420,7 +448,7 @@ Fill in this table after completing all steps. Date, tester name, and SHA of the
 | A5 Captions live | | |
 | A6 App quit keeps vmic | | |
 | A7 Driver + app restart | | |
-| A8 No raw audio/transcripts logged | | |
+| A8 Runtime logs contain no raw audio/transcripts/keys | | |
 | A9 BYOK key not in logs | | |
 | A10 Zoom smoke test | | |
 | A11 Google Meet smoke test | | |
@@ -436,14 +464,11 @@ Once all 12 items show PASS, update `docs/STATUS.md` by checking all 12 Product 
 
 1. In the Intervox Status pane, look for the **Driver Recovery** card. Click **Open Audio MIDI Setup** to confirm whether the device is registered.
 2. If the device is missing, use the **Install Driver** or **Reinstall** button in the Driver Recovery card to reinstall. You will be prompted for your admin password.
-3. If the in-app buttons are not available, run manually:
+3. To run the same install path from the terminal:
    ```bash
    INTERVOX_ASSUME_YES=1 sudo bash scripts/install_driver.sh
    ```
-4. After install, verify with:
-   ```bash
-   system_profiler SPAudioDataType | grep -A3 Intervox
-   ```
+4. After install, verify through **Open Audio MIDI Setup** or the app's bounded Status refresh. Avoid `system_profiler SPAudioDataType` while debugging HAL load issues.
 
 ### Microphone permission denied
 
@@ -464,7 +489,7 @@ Once all 12 items show PASS, update `docs/STATUS.md` by checking all 12 Product 
 1. If another app has already claimed one of the default shortcuts, the Intervox **Status** pane or tray will show an error notification on startup.
 2. Go to **Shortcuts** pane in Intervox Settings and assign a different key combination.
 3. If the shortcut still fails after reassignment, check macOS System Settings > Privacy & Security > Accessibility; Intervox should not require Accessibility permission for global shortcuts (they use the standard `tauri-plugin-global-shortcut` path), but if macOS is blocking them, adding Intervox there may help.
-4. As a fallback, use the tray menu or the in-app mode cards to switch modes manually.
+4. As an alternate control path, use the tray menu or the in-app mode cards to switch modes manually.
 
 ### Driver signed but not notarized (Gatekeeper rejects it)
 

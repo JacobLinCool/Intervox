@@ -32,6 +32,14 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../driver/build/Intervox.driver": "driver/build/Intervox.driver"
+    },
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "hardenedRuntime": true,
+      "signingIdentity": "Developer ID Application: JHEN-KE LIN (5H75SGA7KP)"
+    }
   }
 }

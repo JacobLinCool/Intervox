@@ -12,7 +12,7 @@ if [[ ! -d "$DRIVER_BUNDLE" ]]; then
 fi
 
 # Verify it is Developer-ID signed before wasting a notary round-trip.
-codesign --verify --strict "$DRIVER_BUNDLE"
+codesign --verify --strict --deep --verbose=2 "$DRIVER_BUNDLE"
 
 ZIP="$BUILD_DIR/Intervox.driver.zip"
 rm -f "$ZIP"
@@ -26,5 +26,5 @@ xcrun notarytool submit "$ZIP" \
 echo "Stapling ticket…"
 xcrun stapler staple "$DRIVER_BUNDLE"
 xcrun stapler validate "$DRIVER_BUNDLE"
-spctl -a -vvv -t install "$DRIVER_BUNDLE" || true
+spctl -a -vvv -t install "$DRIVER_BUNDLE"
 echo "Notarized + stapled: $DRIVER_BUNDLE"

@@ -47,7 +47,11 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranslationConfig {
-    pub source_language: String,
+    // NOTE: there is intentionally no `source_language`. The OpenAI realtime
+    // translation endpoint auto-detects the source language and does not accept
+    // it as a parameter, so exposing it would only mislead users. Old config
+    // files that still carry a `source_language` key load fine — serde ignores
+    // unknown fields (see `unknown_future_fields_do_not_crash`).
     pub target_language: String,
     pub quality_mode: String,
 }
@@ -55,7 +59,6 @@ pub struct TranslationConfig {
 impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
-            source_language: "zh".into(),
             target_language: "en".into(),
             quality_mode: "balanced".into(),
         }
@@ -102,11 +105,34 @@ impl Default for CaptionsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrivacyConfig {
     pub save_transcript_history: bool,
-    pub send_diagnostics: bool,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            save_transcript_history: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccountConfig {
+    pub openai_api_key: Option<String>,
+    pub openai_api_key_verified: bool,
+    pub openai_api_key_last_verified: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub show_latency_badge: bool,
+    pub launch_at_login: bool,
+    pub hide_dock_icon: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,6 +167,10 @@ pub struct Config {
     #[serde(default)]
     pub privacy: PrivacyConfig,
     #[serde(default)]
+    pub ui: UiConfig,
+    #[serde(default)]
+    pub account: AccountConfig,
+    #[serde(default)]
     pub shortcuts: ShortcutsConfig,
     #[serde(default)]
     pub onboarding_completed: bool,
@@ -155,6 +185,8 @@ impl Default for Config {
             mix: MixConfig::default(),
             captions: CaptionsConfig::default(),
             privacy: PrivacyConfig::default(),
+            ui: UiConfig::default(),
+            account: AccountConfig::default(),
             shortcuts: ShortcutsConfig::default(),
             onboarding_completed: false,
         }
@@ -175,8 +207,15 @@ impl Config {
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), AppError> {
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| AppError::internal(format!("serialize config: {e}")))?;
+        let path = path.as_ref();
         std::fs::write(path, text)
-            .map_err(|e| AppError::invalid_config(format!("cannot write config: {e}")))
+            .map_err(|e| AppError::invalid_config(format!("cannot write config: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 
     /// Clamp/repair out-of-range values per spec UI limits (original voice
@@ -204,14 +243,15 @@ mod tests {
         assert_eq!(c.version, 1);
         assert_eq!(c.audio.virtual_mic_mode, "silence");
         assert!(c.audio.limiter_enabled);
-        assert_eq!(c.translation.source_language, "zh");
         assert_eq!(c.translation.target_language, "en");
         assert_eq!(c.translation.quality_mode, "balanced");
         assert_eq!(c.mix.original_voice_percent, 15);
         assert_eq!(c.mix.translated_voice_percent, 100);
         assert!(c.mix.duck_original);
         assert!(c.captions.enabled);
-        assert!(!c.privacy.save_transcript_history);
+        assert!(c.privacy.save_transcript_history);
+        assert!(c.account.openai_api_key.is_none());
+        assert!(!c.account.openai_api_key_verified);
         assert_eq!(c.shortcuts.toggle_translate, "Cmd+Shift+T");
     }
 
@@ -251,6 +291,8 @@ mod tests {
         path.push(format!("intervox-cfg-{}.json", std::process::id()));
         let mut c = Config::default();
         c.translation.target_language = "ja".into();
+        c.account.openai_api_key = Some("sk-test-config-roundtrip".into());
+        c.account.openai_api_key_verified = true;
         c.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, c);
@@ -261,7 +303,7 @@ mod tests {
     fn partial_json_uses_defaults_for_missing_sections() {
         let cfg: Config = serde_json::from_str(r#"{"version":1}"#).unwrap();
         assert_eq!(cfg.mix.original_voice_percent, 15);
-        assert_eq!(cfg.translation.source_language, "zh");
+        assert_eq!(cfg.translation.target_language, "en");
     }
 
     #[test]
@@ -269,5 +311,47 @@ mod tests {
         let cfg: Config =
             serde_json::from_str(r#"{"version":1,"audio":{"future_field":42}}"#).unwrap();
         assert_eq!(cfg.audio.virtual_mic_mode, "silence");
+    }
+
+    /// Backward compat: configs written by older builds still carry a
+    /// `translation.source_language` key. It must be ignored, not rejected, and
+    /// the rest of the translation config must still load.
+    #[test]
+    fn legacy_source_language_field_is_ignored() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"version":1,"translation":{"source_language":"zh","target_language":"ja","quality_mode":"accuracy"}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.translation.target_language, "ja");
+        assert_eq!(cfg.translation.quality_mode, "accuracy");
+    }
+
+    #[test]
+    fn legacy_send_diagnostics_key_is_ignored() {
+        // Old configs carried privacy.send_diagnostics; must still load.
+        let cfg: Config = serde_json::from_str(
+            r#"{"version":1,"privacy":{"save_transcript_history":false,"send_diagnostics":true}}"#,
+        )
+        .unwrap();
+        assert!(!cfg.privacy.save_transcript_history);
+    }
+
+    #[test]
+    fn legacy_config_without_save_flag_gets_new_true_default() {
+        // Upgrade path: an old config that has the privacy section but never
+        // set save_transcript_history must pick up the new `true` default.
+        let cfg: Config = serde_json::from_str(
+            r#"{"version":1,"privacy":{"send_diagnostics":true}}"#,
+        )
+        .unwrap();
+        assert!(cfg.privacy.save_transcript_history);
+    }
+
+    #[test]
+    fn ui_config_defaults_off() {
+        let c = Config::default();
+        assert!(!c.ui.show_latency_badge);
+        assert!(!c.ui.launch_at_login);
+        assert!(!c.ui.hide_dock_icon);
     }
 }

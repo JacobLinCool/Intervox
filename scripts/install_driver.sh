@@ -17,6 +17,11 @@ fi
 echo "About to install:"
 echo "  src: $DRIVER_BUNDLE"
 echo "  dst: $INSTALLED_BUNDLE"
+echo "--- verifying source bundle trust chain ---"
+codesign --verify --strict --deep --verbose=2 "$DRIVER_BUNDLE"
+xcrun stapler validate "$DRIVER_BUNDLE"
+spctl -a -vv -t install "$DRIVER_BUNDLE"
+
 echo "This will run 'killall coreaudiod' and interrupt all audio briefly."
 if [[ "${INTERVOX_ASSUME_YES:-}" != "1" ]]; then
     read -r -p "Continue? [y/N] " ans
@@ -33,10 +38,9 @@ echo "Restarting coreaudiod…"
 sudo killall coreaudiod || true
 sleep 2
 
-echo "--- verifying device is present ---"
-if system_profiler SPAudioDataType 2>/dev/null | grep -q "Intervox"; then
-    echo "OK: 'Intervox' input device is registered."
-else
-    echo "Device not visible yet. Check Console.app for '[Intervox]' logs and"
-    echo "run: codesign -dvvv \"$INSTALLED_BUNDLE\"" >&2
-fi
+echo "--- verifying installed bundle ---"
+codesign --verify --strict --deep --verbose=2 "$INSTALLED_BUNDLE"
+xcrun stapler validate "$INSTALLED_BUNDLE"
+spctl -a -vv -t install "$INSTALLED_BUNDLE"
+echo "Installed. Device enumeration is intentionally not run here; use the app's"
+echo "bounded audio-device refresh so a wedged CoreAudio query cannot hang setup."

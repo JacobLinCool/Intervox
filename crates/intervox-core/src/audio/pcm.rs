@@ -51,7 +51,10 @@ mod tests {
 
     #[test]
     fn full_scale_clamps_to_i16_max() {
-        assert_eq!(f32_to_pcm16(&[1.0, -1.0, 2.0, -2.0]), vec![32767, -32767, 32767, -32767]);
+        assert_eq!(
+            f32_to_pcm16(&[1.0, -1.0, 2.0, -2.0]),
+            vec![32767, -32767, 32767, -32767]
+        );
     }
 
     #[test]

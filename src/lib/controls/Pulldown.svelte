@@ -21,15 +21,63 @@
 
   let open = $state(false);
   let containerEl: HTMLDivElement | undefined = $state();
+  let buttonEl: HTMLButtonElement | undefined = $state();
+  let menuEl: HTMLDivElement | undefined = $state();
+  let menuLeft = $state(0);
+  let menuTop = $state(0);
+  let menuWidth = $state(230);
+  let menuMaxHeight = $state(280);
 
   let cur = $derived(options.find((o) => o.value === value) ?? options[0]);
 
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        node.remove();
+      },
+    };
+  }
+
+  function placeMenu() {
+    if (!buttonEl) return;
+    const rect = buttonEl.getBoundingClientRect();
+    const below = window.innerHeight - rect.bottom - 10;
+    const above = rect.top - 10;
+    const maxHeight = Math.min(280, Math.max(120, Math.max(below, above)));
+    menuLeft = rect.left;
+    menuWidth = rect.width || width || 230;
+    menuMaxHeight = maxHeight;
+    menuTop = below >= 160 || below >= above
+      ? rect.bottom + 4
+      : Math.max(10, rect.top - maxHeight - 4);
+  }
+
+  function toggleMenu() {
+    if (!open) placeMenu();
+    open = !open;
+  }
+
   $effect(() => {
     const fn = (e: MouseEvent) => {
-      if (!containerEl?.contains(e.target as Node)) open = false;
+      const target = e.target as Node;
+      if (!containerEl?.contains(target) && !menuEl?.contains(target)) open = false;
     };
     document.addEventListener("mousedown", fn);
     return () => document.removeEventListener("mousedown", fn);
+  });
+
+  $effect(() => {
+    if (!open) return;
+    placeMenu();
+    const close = () => (open = false);
+    const reposition = () => placeMenu();
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", close, true);
+    };
   });
 </script>
 
@@ -38,8 +86,9 @@
   style={css({ position: "relative", width: width ?? 230 })}
 >
   <button
+    bind:this={buttonEl}
     class="btn"
-    onclick={() => (open = !open)}
+    onclick={toggleMenu}
     style={css({
       width: "100%",
       display: "flex",
@@ -92,12 +141,14 @@
 
   {#if open}
     <div
+      use:portal
+      bind:this={menuEl}
       role="listbox"
       style={css({
-        position: "absolute",
-        top: "calc(100% + 4px)",
-        left: 0,
-        width: "100%",
+        position: "fixed",
+        top: menuTop,
+        left: menuLeft,
+        width: menuWidth,
         background: "var(--win-bg)",
         backdropFilter: "saturate(180%) blur(40px)",
         border: "0.5px solid var(--win-border)",
@@ -105,9 +156,9 @@
         boxShadow:
           "0 14px 30px rgba(0,0,0,0.20), 0 0 0 0.5px rgba(0,0,0,0.06)",
         padding: 4,
-        zIndex: 80,
+        zIndex: 8000,
         animation: "pop-in 100ms ease-out both",
-        maxHeight: 280,
+        maxHeight: menuMaxHeight,
         overflowY: "auto",
       })}
     >

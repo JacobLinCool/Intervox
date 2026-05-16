@@ -40,6 +40,17 @@ impl RingProducer {
         self.map.lock().get().write_frames(frames)
     }
 
+    /// Write continuous live audio and cap unread backlog to the live budget.
+    #[allow(dead_code)]
+    pub fn write_live(&self, frames: &[f32]) -> usize {
+        self.map.lock().get().write_live_frames(frames)
+    }
+
+    /// Drop unread audio without writing replacement frames.
+    pub fn clear_unread(&self) {
+        self.map.lock().get().clear();
+    }
+
     /// Signal the driver about the current operating mode.
     /// Use `mode_to_ring_u32` to convert a `VirtualMicMode`.
     pub fn set_mode(&self, m: u32) {
@@ -57,8 +68,8 @@ impl RingProducer {
         translate_chain::frames_to_ms_48k(frames)
     }
 
-    /// Write ~100 ms of silence three times so the driver consumer sees fresh
-    /// zero-filled audio rather than stale captured frames on next open.
+    /// Drop any unread audio and publish fresh silence so the driver consumer
+    /// never receives stale captured frames after a mode change or shutdown.
     ///
     /// Called on shutdown and on a mode-change to `Silence`.
     pub fn flush_silence(&self) {
@@ -66,6 +77,7 @@ impl RingProducer {
         let silence = vec![0.0f32; CHUNK];
         let guard = self.map.lock();
         let ring = guard.get();
+        ring.clear();
         for _ in 0..3 {
             ring.write_frames(&silence);
         }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { css } from "$lib/util";
+  import { rmsToVuLevel } from "./level";
 
   let {
     level = 0,
@@ -14,9 +15,10 @@
   } = $props();
 
   let peak = $state(0);
+  const displayLevel = $derived(rmsToVuLevel(level));
 
   $effect(() => {
-    peak = Math.max(level, peak * 0.95);
+    peak = Math.max(displayLevel, peak * 0.95);
   });
 </script>
 
@@ -36,7 +38,7 @@
       top: 0,
       bottom: 0,
       left: 0,
-      width: level * 100 + "%",
+      width: displayLevel * 100 + "%",
       background: `linear-gradient(90deg, ${color}, color-mix(in oklch, ${color} 60%, white))`,
       borderRadius: height / 2,
       transition: "width 80ms linear",

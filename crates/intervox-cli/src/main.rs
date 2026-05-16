@@ -20,7 +20,9 @@ use intervox_core::virtual_mic::ring_buffer::{
 use intervox_core::{pipeline, AppError};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
-    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn sine(freq: f32, sr: u32, secs: f32) -> Vec<f32> {
@@ -45,8 +47,12 @@ fn main() {
     let code = match cmd {
         "selfcheck" => selfcheck(),
         "resample" => {
-            let i: u32 = arg(&args, "--in").and_then(|s| s.parse().ok()).unwrap_or(48000);
-            let o: u32 = arg(&args, "--out").and_then(|s| s.parse().ok()).unwrap_or(24000);
+            let i: u32 = arg(&args, "--in")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(48000);
+            let o: u32 = arg(&args, "--out")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(24000);
             let input = sine(1000.0, i, 1.0);
             let out = resampler::resample(&input, i, o);
             println!(
@@ -106,7 +112,9 @@ fn main() {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3000);
             let tone_hz: Option<f32> = arg(&args, "--tone-hz").and_then(|s| s.parse().ok());
-            let secs: f32 = arg(&args, "--secs").and_then(|s| s.parse().ok()).unwrap_or(6.0);
+            let secs: f32 = arg(&args, "--secs")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6.0);
             match SharedRingMap::create(DEFAULT_SHM_NAME, 48000, 1) {
                 Ok(map) => {
                     if let Some(hz) = tone_hz {
@@ -140,7 +148,9 @@ fn main() {
                     } else {
                         let ramp: Vec<f32> = (0..480).map(|i| i as f32 / 480.0).collect();
                         let n = map.get().write_frames(&ramp);
-                        println!("producer: created {DEFAULT_SHM_NAME}, wrote {n}, holding {hold_ms}ms");
+                        println!(
+                            "producer: created {DEFAULT_SHM_NAME}, wrote {n}, holding {hold_ms}ms"
+                        );
                         std::thread::sleep(std::time::Duration::from_millis(hold_ms));
                         0
                     }
@@ -219,16 +229,25 @@ fn selfcheck() -> i32 {
 
     // Pipeline non-negotiable rules (§19)
     let sil = pipeline::route(VirtualMicMode::Silence);
-    check!("silence: vmic silent + no openai", sil.vmic_silence && !sil.openai_connected);
+    check!(
+        "silence: vmic silent + no openai",
+        sil.vmic_silence && !sil.openai_connected
+    );
     let pt = pipeline::route(VirtualMicMode::PassThrough);
     check!("passthrough: no openai cost", !pt.openai_connected);
     let tr = pipeline::route(VirtualMicMode::Translate);
-    check!("translate: no original leak", !tr.mic_to_vmic && !tr.mix_original);
+    check!(
+        "translate: no original leak",
+        !tr.mic_to_vmic && !tr.mix_original
+    );
 
     // Resampler
     let s = sine(1000.0, 48000, 1.0);
     let ds = resampler::resample(&s, 48000, 24000);
-    check!("resample halves count", (ds.len() as i64 - 24000).abs() <= 2);
+    check!(
+        "resample halves count",
+        (ds.len() as i64 - 24000).abs() <= 2
+    );
     check!(
         "resample preserves 1kHz",
         (detect_freq(&ds, 24000) - 1000.0).abs() < 30.0
@@ -238,9 +257,15 @@ fn selfcheck() -> i32 {
     let mset = mixer::MixSettings::default();
     let o_only = mixer::mix_frames(&vec![0.0; 256], &vec![1.0; 256], &mset);
     let t_only = mixer::mix_frames(&vec![1.0; 256], &vec![0.0; 256], &mset);
-    check!("original quieter than translated", peak(&o_only) < peak(&t_only));
+    check!(
+        "original quieter than translated",
+        peak(&o_only) < peak(&t_only)
+    );
     let limited = mixer::mix_frames(&vec![5.0; 64], &[], &mixer::MixSettings::default());
-    check!("limiter caps below full scale", limited.iter().all(|v| v.abs() <= 1.0));
+    check!(
+        "limiter caps below full scale",
+        limited.iter().all(|v| v.abs() <= 1.0)
+    );
 
     // Level meter
     let lvl = LevelMeter::measure(&s);
@@ -262,7 +287,7 @@ fn selfcheck() -> i32 {
     // OpenAI event model
     check!(
         "session.update spec 8.3",
-        build_session_update("zh", "en")["session"]["audio"]["output"]["language"] == "en"
+        build_session_update("en")["session"]["audio"]["output"]["language"] == "en"
     );
     check!(
         "parse session.updated",

@@ -35,6 +35,20 @@ describe("AudioPane", () => {
     expect(container.innerHTML).not.toContain("MacBook Pro Microphone");
     expect(container.innerHTML).not.toContain("Shure MV7");
   });
+
+  it("clicking an output mode calls store.setMode", async () => {
+    const original = store.setMode.bind(store);
+    let selected: string | null = null;
+    store.setMode = async (mode: any) => { selected = mode; };
+
+    try {
+      const { getByText } = r3(AudioPane as any);
+      await fireEvent.click(getByText("Pass-through"));
+      expect(selected).toBe("pass");
+    } finally {
+      store.setMode = original;
+    }
+  });
 });
 
 import TranslationPane from "./panes/TranslationPane.svelte";
@@ -42,7 +56,7 @@ import { render as r4 } from "@testing-library/svelte";
 describe("TranslationPane", () => {
   it("renders languages, performance, and disables mix slider unless mixed mode", () => {
     const { container, getByText } = r4(TranslationPane as any);
-    expect(container.innerHTML).toContain("Source language");
+    expect(container.innerHTML).toContain("Target language");
     expect(container.innerHTML).toContain("Original voice volume");
     expect(getByText("Show all languages…")).toBeTruthy();
   });
@@ -58,7 +72,10 @@ describe("remaining panes", () => {
     expect(r5(CaptionsPane as any).container.innerHTML).toContain("Floating captions");
     expect(r5(ShortcutsPane as any).container.innerHTML).toContain("Global Shortcuts");
     expect(r5(PrivacyPane as any).container.innerHTML).toContain("How translation works");
-    expect(r5(AdvancedPane as any).container.innerHTML).toContain("build 482");
+    const advHtml = r5(AdvancedPane as any).container.innerHTML;
+    // Footer shows "Intervox · © 2026" (dynamic version is empty in test env)
+    expect(advHtml).toContain("Intervox");
+    expect(advHtml).toContain("© 2026");
   });
 });
 
@@ -124,11 +141,75 @@ describe("Captions honest", () => {
 });
 
 import Onboarding from "./Onboarding.svelte";
-import { render as r8 } from "@testing-library/svelte";
+import { fireEvent, render as r8, waitFor } from "@testing-library/svelte";
 describe("Onboarding honest", () => {
   it("hidden by default; no fake transcript sentences in source", () => {
     const { container } = r8(Onboarding as any);
     expect(container.querySelector("[data-onboarding]")).toBeNull();
+  });
+
+  async function advanceToMicStep(getByText: (text: string) => HTMLElement) {
+    await fireEvent.click(getByText("Get Started"));
+    await fireEvent.click(getByText("Continue"));
+  }
+
+  function continueButton(container: HTMLElement) {
+    return Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Continue"
+    ) as HTMLButtonElement | undefined;
+  }
+
+  it("does not mark microphone access allowed when the OS returns denied", async () => {
+    const originalRefresh = store.refreshMicPermission.bind(store);
+    const originalRequest = store.requestMicPermission.bind(store);
+
+    store.onboardingOpen = true;
+    store.account = { hasKey: true, verified: true, maskedKey: "sk-...", lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+    store.micPermission = "notDetermined";
+    store.refreshMicPermission = async () => {};
+    store.requestMicPermission = async () => {
+      store.micPermission = "denied";
+      return "denied";
+    };
+
+    try {
+      const { container, getByText, queryByText } = r8(Onboarding as any);
+      await advanceToMicStep(getByText);
+
+      await fireEvent.click(getByText("Allow Microphone"));
+      await waitFor(() => expect(getByText("Denied")).toBeTruthy());
+
+      expect(queryByText("Allowed")).toBeNull();
+      expect(continueButton(container)?.disabled).toBe(true);
+    } finally {
+      store.refreshMicPermission = originalRefresh;
+      store.requestMicPermission = originalRequest;
+      store.onboardingOpen = false;
+      store.account = { hasKey: false, verified: false, maskedKey: null, lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+      store.micPermission = "notDetermined";
+    }
+  });
+
+  it("enables the microphone step only when permission is granted", async () => {
+    const originalRefresh = store.refreshMicPermission.bind(store);
+
+    store.onboardingOpen = true;
+    store.account = { hasKey: true, verified: true, maskedKey: "sk-...", lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+    store.micPermission = "granted";
+    store.refreshMicPermission = async () => {};
+
+    try {
+      const { container, getByText } = r8(Onboarding as any);
+      await advanceToMicStep(getByText);
+
+      expect(getByText("Allowed")).toBeTruthy();
+      expect(continueButton(container)?.disabled).toBe(false);
+    } finally {
+      store.refreshMicPermission = originalRefresh;
+      store.onboardingOpen = false;
+      store.account = { hasKey: false, verified: false, maskedKey: null, lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+      store.micPermission = "notDetermined";
+    }
   });
 });
 
@@ -160,6 +241,7 @@ describe("StatusPane driver recovery card", () => {
     store.status = {
       mode: "translate",
       health: "error",
+      translation: "idle",
       sourceMicName: null,
       virtualMicInstalled: false,
       openaiConnected: false,
@@ -181,6 +263,7 @@ describe("StatusPane driver recovery card", () => {
     store.status = {
       mode: "translate",
       health: "ready",
+      translation: "connected",
       sourceMicName: "Built-in Microphone",
       virtualMicInstalled: true,
       openaiConnected: false,
