@@ -7,4 +7,12 @@ export default defineConfig({
   resolve: { alias: { $lib: resolve(__dirname, "src/lib") } },
   clearScreen: false,
   server: { port: 1420, strictPort: true, watch: { ignored: ["**/src-tauri/**"] } },
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, "index.html"),
+        captions: resolve(__dirname, "captions.html"),
+      },
+    },
+  },
 });

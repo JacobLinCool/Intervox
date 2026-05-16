@@ -62,6 +62,44 @@ describe("remaining panes", () => {
   });
 });
 
+describe("AudioPane removed controls", () => {
+  it("does NOT render feedback protection toggle (removed — no DSP backend in virtual-mic arch)", () => {
+    const { container } = r3(AudioPane as any);
+    expect(container.innerHTML).not.toContain("Feedback protection");
+    expect(container.innerHTML).not.toContain("feedback");
+  });
+
+  it("does NOT render mic environment selector (removed — no backend config field)", () => {
+    const { container } = r3(AudioPane as any);
+    expect(container.innerHTML).not.toContain("Mic environment");
+    expect(container.innerHTML).not.toContain("Headset / close mic");
+  });
+});
+
+import { store } from "$lib/store.svelte";
+describe("AdvancedPane clear history", () => {
+  it("renders Clear history button and description", () => {
+    const { container } = r5(AdvancedPane as any);
+    expect(container.innerHTML).toContain("Clear history");
+    expect(container.innerHTML).toContain("Clear transcript history");
+  });
+
+  it("Clear history button invokes store.clearHistory on click", async () => {
+    const original = store.clearHistory.bind(store);
+    let called = false;
+    store.clearHistory = async () => { called = true; };
+    const { container } = r5(AdvancedPane as any);
+    const btn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Clear history"
+    ) as HTMLButtonElement | undefined;
+    expect(btn).toBeTruthy();
+    btn!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(called).toBe(true);
+    store.clearHistory = original;
+  });
+});
+
 import QuickStatus from "./QuickStatus.svelte";
 import { render as r6 } from "@testing-library/svelte";
 describe("QuickStatus", () => {
@@ -91,5 +129,68 @@ describe("Onboarding honest", () => {
   it("hidden by default; no fake transcript sentences in source", () => {
     const { container } = r8(Onboarding as any);
     expect(container.querySelector("[data-onboarding]")).toBeNull();
+  });
+});
+
+import CaptionsWindow from "../CaptionsWindow.svelte";
+import { render as rCW } from "@testing-library/svelte";
+describe("CaptionsWindow", () => {
+  it("renders the pop-out container with data-captions-window", () => {
+    const { container } = rCW(CaptionsWindow as any);
+    expect(container.querySelector("[data-captions-window]")).not.toBeNull();
+  });
+
+  it("shows 'Waiting for translation' placeholder when store is empty", () => {
+    const { container } = rCW(CaptionsWindow as any);
+    expect(container.innerHTML).toContain("Waiting for translation");
+  });
+
+  it("does not show source block when srcText is empty", () => {
+    const { container } = rCW(CaptionsWindow as any);
+    // No "Original" label rendered when srcText is empty
+    expect(container.innerHTML).not.toContain("Original");
+  });
+});
+
+import StatusPane from "./panes/StatusPane.svelte";
+import { render as r9 } from "@testing-library/svelte";
+describe("StatusPane driver recovery card", () => {
+  it("shows recovery card with install/reinstall/audio-midi buttons when driver missing", () => {
+    // Simulate driver missing: virtualMicInstalled = false
+    store.status = {
+      mode: "translate",
+      health: "error",
+      sourceMicName: null,
+      virtualMicInstalled: false,
+      openaiConnected: false,
+      latencyMs: null,
+      targetLanguage: "en",
+      inputLevel: 0,
+      outputLevel: 0,
+    };
+    store.driverState = "missing";
+    const { container } = r9(StatusPane as any);
+    expect(container.querySelector("[data-driver-recovery]")).not.toBeNull();
+    expect(container.querySelector("[data-driver-install]")).not.toBeNull();
+    expect(container.querySelector("[data-driver-reinstall]")).not.toBeNull();
+    expect(container.querySelector("[data-driver-audio-midi]")).not.toBeNull();
+    expect(container.innerHTML).toContain("Driver Recovery");
+  });
+
+  it("hides recovery card when driver is installed and running", () => {
+    store.status = {
+      mode: "translate",
+      health: "ready",
+      sourceMicName: "Built-in Microphone",
+      virtualMicInstalled: true,
+      openaiConnected: false,
+      latencyMs: null,
+      targetLanguage: "en",
+      inputLevel: 0,
+      outputLevel: 0,
+    };
+    store.driverState = "healthy";
+    const { container } = r9(StatusPane as any);
+    expect(container.querySelector("[data-driver-recovery]")).toBeNull();
   });
 });

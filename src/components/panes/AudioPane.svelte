@@ -1,14 +1,11 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
   import { MODES } from "$lib/constants";
-  import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown, Toggle, Segmented } from "$lib/controls";
+  import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown } from "$lib/controls";
   import { SysIcon } from "$lib/icons";
   import { VUStrip } from "$lib/vu";
   import { css } from "$lib/util";
   import ModeCard from "./ModeCard.svelte";
-
-  // UI-only: no backend field yet; not persisted (honest — does not fake persistence)
-  let micEnv = $state<"near" | "far">("near");
 
   let sourceMicValue = $derived(
     store.config?.audio.source_mic_id ?? store.devices.inputs[0]?.id ?? "",
@@ -66,6 +63,25 @@
   </Row>
 </FieldGroup>
 
+{#if store.micPermission !== "granted"}
+<FieldGroup title="Microphone Permission">
+  <Row last>
+    <RowLabel
+      title={store.micPermission === "denied" ? "Access denied" : store.micPermission === "restricted" ? "Access restricted" : "Permission not yet granted"}
+      sub={store.micPermission === "denied" ? "Intervox needs microphone access to translate." : store.micPermission === "restricted" ? "Microphone access is restricted by a system policy." : "Intervox will request microphone access when you start translating."}
+    />
+    <span style={css({ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" })}>
+      {#if store.micPermission !== "restricted"}
+        <button
+          style={css({ fontSize: 12, fontWeight: 500, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--brd-1)", background: "var(--bg-2)", color: "var(--txt-1)", cursor: "pointer" })}
+          onclick={() => store.openMicPermission()}
+        >Open Privacy Settings</button>
+      {/if}
+    </span>
+  </Row>
+</FieldGroup>
+{/if}
+
 <FieldGroup
   title="Virtual Microphone"
   hint="Select Translator Mic as your microphone in Zoom, Google Meet, Teams, or Discord."
@@ -105,28 +121,3 @@
   </Row>
 </FieldGroup>
 
-<FieldGroup title="Input">
-  <Row>
-    <RowLabel title="Mic environment" sub="Helps Intervox choose the right input cleanup for your mic." />
-    <span style={css({ marginLeft: "auto" })}>
-      <Segmented
-        value={micEnv}
-        options={[
-          { value: "near", label: "Headset / close mic" },
-          { value: "far", label: "Laptop or room mic" },
-        ]}
-        onChange={(v) => { micEnv = v; }}
-      />
-    </span>
-  </Row>
-  <Row last>
-    <RowLabel title="Feedback protection" sub="Helps reduce repeated audio when using speakers." />
-    <span style={css({ marginLeft: "auto" })}>
-      <Toggle
-        value={store.feedbackProtection}
-        onChange={(v) => { store.setFeedbackProtection(v); }}
-        tint="var(--c-mixed)"
-      />
-    </span>
-  </Row>
-</FieldGroup>

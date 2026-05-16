@@ -18,8 +18,10 @@ echo "About to install:"
 echo "  src: $DRIVER_BUNDLE"
 echo "  dst: $INSTALLED_BUNDLE"
 echo "This will run 'killall coreaudiod' and interrupt all audio briefly."
-read -r -p "Continue? [y/N] " ans
-[[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "Aborted."; exit 1; }
+if [[ "${INTERVOX_ASSUME_YES:-}" != "1" ]]; then
+    read -r -p "Continue? [y/N] " ans
+    [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "Aborted."; exit 1; }
+fi
 
 sudo mkdir -p "$HAL_DIR"
 sudo rm -rf "$INSTALLED_BUNDLE"

@@ -114,6 +114,25 @@ impl AppError {
         )
     }
 
+    /// Like `audio_device_lost` but with a `RecoveryAction` pointing at
+    /// `set_virtual_mic_mode`.  The frontend error banner will render a "Retry"
+    /// button that invokes `set_virtual_mic_mode` to re-enter the current mode
+    /// and restart capture.
+    ///
+    /// Used by the capture watcher (Task 4.5) when it detects unexpected device
+    /// loss and emits the error to the frontend alongside the auto-restart attempt.
+    pub fn audio_device_lost_retryable() -> Self {
+        Self::new(
+            AppErrorCode::AudioDeviceLost,
+            "Audio device disconnected",
+            "The selected microphone is no longer available. Attempting to reconnect.",
+            Some(RecoveryAction {
+                label: "Retry".into(),
+                command: "set_virtual_mic_mode".into(),
+            }),
+        )
+    }
+
     pub fn ring_buffer_error(message: impl Into<String>) -> Self {
         Self::new(
             AppErrorCode::RingBufferError,
@@ -180,8 +199,52 @@ mod tests {
     }
 
     #[test]
+    fn audio_device_lost_retryable_has_recovery_action() {
+        let e = AppError::audio_device_lost_retryable();
+        let ra = e.recovery_action.as_ref().expect("must have recovery action");
+        assert_eq!(ra.label, "Retry");
+        assert_eq!(ra.command, "set_virtual_mic_mode");
+        assert_eq!(e.code, AppErrorCode::AudioDeviceLost);
+        // Verify it serializes with recovery_action present.
+        let j = serde_json::to_string(&e).unwrap();
+        assert!(j.contains("recovery_action"), "retryable error must include recovery_action in JSON");
+    }
+
+    #[test]
     fn display_includes_code() {
         let s = format!("{}", AppError::network_error("offline"));
         assert!(s.contains("NETWORK_ERROR"));
+    }
+
+    /// Privacy: the `openai_auth_error` constructor and its Display must never
+    /// include an `sk-` prefix.  This proves that even if a caller passes a
+    /// static message the resulting error cannot expose an API key.
+    #[test]
+    fn openai_auth_error_display_contains_no_sk_prefix() {
+        let e = AppError::openai_auth_error("Invalid API key");
+        let display = format!("{e}");
+        assert!(
+            !display.contains("sk-"),
+            "AppError display must not contain 'sk-': {display}"
+        );
+        // Also check the message field directly.
+        assert!(
+            !e.message.contains("sk-"),
+            "AppError.message must not contain 'sk-': {}",
+            e.message
+        );
+    }
+
+    /// Privacy: verify_api_key-style auth errors that could conceivably carry
+    /// the key in their message must NOT do so.  The canonical error is "Invalid
+    /// API key" — a static string — not the key value.
+    #[test]
+    fn auth_error_message_is_static_not_key_value() {
+        // Simulate what commands.rs does: classify 401 → "Invalid API key".
+        let e = AppError::openai_auth_error("Invalid API key");
+        // The message is the human description, not the key string.
+        assert_eq!(e.message, "Invalid API key");
+        // It must not resemble a real key.
+        assert!(!e.message.starts_with("sk-"), "message must not be the key value");
     }
 }

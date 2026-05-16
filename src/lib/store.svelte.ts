@@ -1,6 +1,6 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { cmd, on } from "./tauri";
-import type { AppStatus, AudioDevices, Config, AccountStatus, AppError, MixSettings } from "./tauri";
+import type { AppStatus, AudioDevices, Config, AccountStatus, AppError, MicPermission, DriverState } from "./tauri";
 import {
   modeFromBackend, modeToBackend,
   qualityToLatency, latencyToQuality,
@@ -50,6 +50,9 @@ class Store {
     usageUsd: 0,
   });
 
+  micPermission: MicPermission = $state("notDetermined");
+  driverState: DriverState = $state("missing");
+
   srcText: string = $state("");
   tgtText: string = $state("");
   inputLevel: number = $state(0);
@@ -60,11 +63,10 @@ class Store {
   // UI-nav flags
   settingsTab: string = $state("status");
   captionsOpen: boolean = $state(false);
+  captionsWindowOpen: boolean = $state(false);
   quickOpen: boolean = $state(false);
   onboardingOpen: boolean = $state(false);
 
-  // Audio settings
-  feedbackProtection: boolean = $state(true);
 
   // Appearance
   theme: "light" | "dark" = $state("light");
@@ -76,16 +78,20 @@ class Store {
 
   async init(): Promise<void> {
     try {
-      const [status, devices, config, account] = await Promise.all([
+      const [status, devices, config, account, micPermission, driverState] = await Promise.all([
         cmd.getAppStatus(),
         cmd.getAudioDevices(),
         cmd.getConfig(),
         cmd.getAccountStatus(),
+        cmd.getMicPermission(),
+        cmd.getDriverState(),
       ]);
       this.status = status;
       this.devices = devices;
       this.config = config;
       this.account = account;
+      this.micPermission = micPermission;
+      this.driverState = driverState;
 
       this.captionsOpen = config.captions.enabled;
       this.onboardingOpen = !config.onboarding_completed;
@@ -98,19 +104,33 @@ class Store {
     }
 
     // Subscribe to events — push unlisten fns
-    this.unlisten.push(await on.status((s) => { this.status = s; }));
+    this.unlisten.push(await on.status((s) => {
+      this.status = s;
+      // Honest idle: clear transcripts when mode is not translating.
+      if (s.mode === "silence" || s.mode === "pass_through") this.clearTranscripts();
+    }));
     this.unlisten.push(await on.inputLevel((v) => { this.inputLevel = v; }));
     this.unlisten.push(await on.outputLevel((v) => { this.outputLevel = v; }));
     this.unlisten.push(await on.latency((v) => {
       if (this.status) this.status = { ...this.status, latencyMs: v };
     }));
     this.unlisten.push(await on.srcDelta((t) => {
-      this.srcText += t;
+      let s = this.srcText + t;
+      if (s.length > 4000) s = s.slice(-4000);
+      this.srcText = s;
       this.sourceDetected = true;
     }));
-    this.unlisten.push(await on.tgtDelta((t) => { this.tgtText += t; }));
+    this.unlisten.push(await on.tgtDelta((t) => {
+      let s = this.tgtText + t;
+      if (s.length > 4000) s = s.slice(-4000);
+      this.tgtText = s;
+    }));
     this.unlisten.push(await on.devices((d) => { this.devices = d; }));
     this.unlisten.push(await on.error((e) => { this.lastError = e; }));
+    // transcript-cleared: reset in-session transcript buffers.
+    // There is no on-disk transcript history (privacy.save_transcript_history
+    // defaults false), so "clear" means zeroing the live session buffers only.
+    this.unlisten.push(await on.transcriptCleared(() => { this.clearTranscripts(); }));
   }
 
   dispose(): void {
@@ -281,12 +301,46 @@ class Store {
   }
 
   async installVirtualMic(): Promise<void> {
-    // Note: currently rejects with driver_missing — catch → set lastError; do NOT fake installed
     await this.tryCmd(() => cmd.installVirtualMic());
+    await this.refreshDriverState();
+  }
+
+  async updateVirtualMic(): Promise<void> {
+    await this.tryCmd(() => cmd.updateVirtualMic());
+    await this.refreshDriverState();
+  }
+
+  async uninstallVirtualMic(): Promise<void> {
+    await this.tryCmd(() => cmd.uninstallVirtualMic());
+    await this.refreshDriverState();
+  }
+
+  async refreshDriverState(): Promise<void> {
+    try {
+      this.driverState = await cmd.getDriverState();
+    } catch {
+      // leave existing value
+    }
+  }
+
+  async openAudioMidiSetup(): Promise<void> {
+    await this.tryCmd(() => cmd.openAudioMidiSetup());
   }
 
   async openMicPermission(): Promise<void> {
     await this.tryCmd(() => cmd.openMicPermissionSettings());
+  }
+
+  async openAccessibilitySettings(): Promise<void> {
+    await this.tryCmd(() => cmd.openAccessibilitySettings());
+  }
+
+  async refreshMicPermission(): Promise<void> {
+    try {
+      this.micPermission = await cmd.getMicPermission();
+    } catch {
+      // leave existing value
+    }
   }
 
   async startTest(): Promise<void> {
@@ -310,6 +364,13 @@ class Store {
     this.sourceDetected = false;
   }
 
+  async clearHistory(): Promise<void> {
+    // Calls clear_transcript_history on the backend, which emits
+    // "transcript-cleared".  The on.transcriptCleared listener in init()
+    // then calls clearTranscripts() to zero the live session buffers.
+    await this.tryCmd(() => cmd.clearTranscriptHistory());
+  }
+
   dismissError(): void {
     this.lastError = null;
   }
@@ -322,13 +383,26 @@ class Store {
   setTheme(t: "light" | "dark"): void { this.theme = t; }
   setWallpaper(w: string): void { this.wallpaper = w; }
 
+  async openCaptionsWindow(): Promise<void> {
+    const ok = await this.tryCmd(() => cmd.openCaptionsWindow());
+    if (ok) this.captionsWindowOpen = true;
+  }
+
+  async closeCaptionsWindow(): Promise<void> {
+    const ok = await this.tryCmd(() => cmd.closeCaptionsWindow());
+    if (ok) this.captionsWindowOpen = false;
+  }
+
+  async toggleCaptionsWindow(): Promise<void> {
+    if (this.captionsWindowOpen) {
+      await this.closeCaptionsWindow();
+    } else {
+      await this.openCaptionsWindow();
+    }
+  }
+
   quit(): void { void cmd.closeWindow(); }
 
-  async setFeedbackProtection(v: boolean): Promise<void> {
-    this.feedbackProtection = v;
-    const settings: MixSettings = { original_gain_db: 0, translated_gain_db: 0, duck_original: v, limiter_enabled: v };
-    await this.tryCmd(() => cmd.setMixSettings(settings));
-  }
 }
 
 export const store = new Store();

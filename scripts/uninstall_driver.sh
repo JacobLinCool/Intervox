@@ -9,8 +9,10 @@ if [[ ! -d "$INSTALLED_BUNDLE" ]]; then
     exit 0
 fi
 
-read -r -p "Remove $INSTALLED_BUNDLE and restart coreaudiod? [y/N] " ans
-[[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "Aborted."; exit 1; }
+if [[ "${INTERVOX_ASSUME_YES:-}" != "1" ]]; then
+    read -r -p "Remove $INSTALLED_BUNDLE and restart coreaudiod? [y/N] " ans
+    [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "Aborted."; exit 1; }
+fi
 
 sudo rm -rf "$INSTALLED_BUNDLE"
 sudo killall coreaudiod || true

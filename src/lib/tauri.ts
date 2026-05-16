@@ -21,6 +21,8 @@ export interface AccountStatus {
   hasKey: boolean; verified: boolean;
   maskedKey: string | null; lastVerified: string | null; usageUsd: number;
 }
+export type MicPermission = "granted" | "denied" | "notDetermined" | "restricted";
+export type DriverState = "missing" | "installedNotRunning" | "healthy" | "stale";
 export interface MixSettings {
   original_gain_db: number;
   translated_gain_db: number;
@@ -59,12 +61,21 @@ export const cmd = {
   verifyApiKey: () => invoke<AccountStatus>("verify_api_key"),
   clearApiKey: () => invoke("clear_api_key"),
   installVirtualMic: () => invoke("install_virtual_mic"),
+  updateVirtualMic: () => invoke("update_virtual_mic"),
+  uninstallVirtualMic: () => invoke("uninstall_virtual_mic"),
+  getDriverState: () => invoke<DriverState>("get_driver_state"),
+  openAudioMidiSetup: () => invoke("open_audio_midi_setup"),
   openMicPermissionSettings: () => invoke("open_system_mic_permission_settings"),
+  getMicPermission: () => invoke<MicPermission>("get_mic_permission"),
   startTestPhrase: () => invoke("start_test_phrase"),
+  clearTranscriptHistory: () => invoke("clear_transcript_history"),
   stopAllAudio: () => invoke("stop_all_audio"),
   completeOnboarding: () => invoke("complete_onboarding"),
   closeWindow: () => getCurrentWindow().close(),
   setMixSettings: (settings: MixSettings) => invoke("set_mix_settings", { settings }),
+  openCaptionsWindow: () => invoke("open_captions_window"),
+  closeCaptionsWindow: () => invoke("close_captions_window"),
+  openAccessibilitySettings: () => invoke("open_accessibility_settings"),
 };
 export const on = {
   status: (f: (s: AppStatus) => void) => listen<AppStatus>("status-changed", (e) => f(e.payload)),
@@ -78,5 +89,6 @@ export const on = {
   devices: (f: (d: AudioDevices) => void) =>
     listen<AudioDevices>("device-list-changed", (e) => f(e.payload)),
   error: (f: (err: AppError) => void) => listen<AppError>("error", (e) => f(e.payload)),
+  transcriptCleared: (f: () => void) => listen("transcript-cleared", () => f()),
 };
 export type { UnlistenFn };

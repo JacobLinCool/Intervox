@@ -11,6 +11,16 @@
   const isTranslating = $derived(store.isTranslating);
   const hasError = $derived(!!store.lastError);
 
+  // ── Driver recovery ─────────────────────────────────────────
+  const driverMissing = $derived(store.status?.virtualMicInstalled === false);
+  const driverStateLabel = $derived(
+    store.driverState === "installedNotRunning"
+      ? "Driver installed but not running"
+      : store.driverState === "stale"
+        ? "Driver version mismatch — reinstall recommended"
+        : "Virtual mic driver is not installed"
+  );
+
   // ── System check rows ───────────────────────────────────────
   const checks = $derived.by(() => {
     const micPermOk = store.errorKind !== "permission";
@@ -37,9 +47,13 @@
       {
         ok: virtualMicOk,
         label: "Translator Mic installed",
-        failLabel: "Translator Mic is not installed",
-        cta: "Install Virtual Mic",
-        onCta: () => store.installVirtualMic(),
+        failLabel: driverStateLabel,
+        cta: store.driverState === "installedNotRunning" || store.driverState === "stale"
+          ? "Reinstall Driver"
+          : "Install Driver",
+        onCta: store.driverState === "installedNotRunning" || store.driverState === "stale"
+          ? () => store.updateVirtualMic()
+          : () => store.installVirtualMic(),
       },
       !keyOk
         ? {
@@ -377,3 +391,63 @@
     </Row>
   {/each}
 </FieldGroup>
+
+<!-- Driver recovery card — shown when virtual mic is not installed/running -->
+{#if driverMissing}
+  <div
+    data-driver-recovery
+    class="card"
+    style={css({
+      padding: 16,
+      marginTop: 12,
+      borderColor: "color-mix(in oklch, var(--c-error) 28%, var(--card-border))",
+      background: "color-mix(in oklch, var(--c-error) 6%, var(--card-bg))",
+    })}
+  >
+    <div
+      style={css({
+        fontSize: 13,
+        fontWeight: 600,
+        color: "var(--c-error)",
+        marginBottom: 4,
+      })}
+    >
+      Driver Recovery
+    </div>
+    <div
+      style={css({
+        fontSize: 12.5,
+        color: "var(--txt-2)",
+        marginBottom: 12,
+      })}
+    >
+      {driverStateLabel}. You will be prompted for your administrator password.
+    </div>
+    <div style={css({ display: "flex", gap: 8, flexWrap: "wrap" })}>
+      <button
+        class="btn"
+        data-driver-install
+        onclick={() => store.installVirtualMic()}
+        style={css({ fontSize: 12 })}
+      >
+        Install Driver
+      </button>
+      <button
+        class="btn"
+        data-driver-reinstall
+        onclick={() => store.updateVirtualMic()}
+        style={css({ fontSize: 12 })}
+      >
+        Reinstall
+      </button>
+      <button
+        class="btn"
+        data-driver-audio-midi
+        onclick={() => store.openAudioMidiSetup()}
+        style={css({ fontSize: 12 })}
+      >
+        Open Audio MIDI Setup
+      </button>
+    </div>
+  </div>
+{/if}

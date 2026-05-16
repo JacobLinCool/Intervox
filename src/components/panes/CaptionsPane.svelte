@@ -8,6 +8,8 @@
 
   // UI-only: auto-hide not persisted yet (honest)
   let autoHide = $state("never");
+
+  const captionsEnabled = $derived(store.config?.captions.enabled ?? false);
 </script>
 
 <PaneTitle
@@ -23,6 +25,21 @@
         value={store.config?.captions.enabled ?? store.captionsOpen}
         onChange={(v) => store.setCaptions({ enabled: v })}
         tint="var(--c-mixed)"
+      />
+    </span>
+  </Row>
+  <Row>
+    <RowLabel
+      title="Pop-out captions window"
+      sub={captionsEnabled
+        ? "Open a dedicated always-on-top captions window."
+        : "Enable floating captions above to use the pop-out window."}
+    />
+    <span style={css({ marginLeft: "auto", opacity: captionsEnabled ? 1 : 0.35, pointerEvents: captionsEnabled ? "auto" : "none" })}>
+      <Toggle
+        value={store.captionsWindowOpen}
+        onChange={() => store.toggleCaptionsWindow()}
+        tint="var(--c-translate)"
       />
     </span>
   </Row>

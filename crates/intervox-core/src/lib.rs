@@ -7,9 +7,11 @@
 //! are wired in.
 
 pub mod errors;
+pub mod redact;
 pub mod state;
 pub mod config;
 pub mod pipeline;
+pub mod engine_graph;
 
 pub mod audio {
     pub mod pcm;
@@ -23,6 +25,7 @@ pub mod audio {
 
 pub mod realtime {
     pub mod events;
+    pub mod openai_auth;
 }
 
 pub mod captions {
@@ -38,6 +41,7 @@ pub mod virtual_mic {
 }
 
 pub use config::Config;
+pub use engine_graph::FrameRouting;
 pub use errors::{AppError, AppErrorCode, RecoveryAction};
 pub use pipeline::{route, RouteDecision};
 pub use state::{AppState, AppStatus, Health, VirtualMicMode};

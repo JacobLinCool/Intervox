@@ -28,11 +28,20 @@
       />
     </span>
   </Row>
-  <Row last>
+  <Row>
     <RowLabel title="Connection log" />
     <span style={css({ marginLeft: "auto" })}>
       <!-- UI-only: not persisted yet -->
       <button class="btn" onclick={() => {}}>View log</button>
+    </span>
+  </Row>
+  <Row last>
+    <RowLabel
+      title="Clear transcript history"
+      sub="Clears the current session transcript from the display. No transcript is saved to disk."
+    />
+    <span style={css({ marginLeft: "auto" })}>
+      <button class="btn" onclick={() => store.clearHistory()}>Clear history</button>
     </span>
   </Row>
 </FieldGroup>
