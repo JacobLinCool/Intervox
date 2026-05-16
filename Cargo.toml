@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/intervox-core", "crates/intervox-cli"]
+# src-tauri is its own crate (pulls heavy GUI deps); kept out of the core
+# workspace so `cargo test --workspace` stays fast and headless.
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Intervox"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"

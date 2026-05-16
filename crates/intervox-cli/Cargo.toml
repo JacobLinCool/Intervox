@@ -1,0 +1,15 @@
+[package]
+name = "intervox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI harness to exercise and verify intervox-core without UI/driver/network."
+
+[[bin]]
+name = "intervox"
+path = "src/main.rs"
+
+[dependencies]
+intervox-core = { path = "../intervox-core" }
+serde_json = { workspace = true }
