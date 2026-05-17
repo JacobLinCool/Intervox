@@ -1,49 +1,60 @@
 # Intervox
 
 Intervox is a macOS desktop app that translates live speech and exposes the
-result as a CoreAudio virtual microphone for meeting apps.
+result as a virtual microphone for any apps.
 
-The app captures a selected physical microphone, uses the user's OpenAI API key
-to run realtime translation, and writes the translated audio into a HAL virtual
-input device. Meeting apps then select that virtual input instead of the
-physical microphone.
+Speak normally. Intervox listens through your real microphone, translates what
+you say, and makes the translated voice available as **Translator Mic**. Zoom,
+Google Meet, QuickTime, and any app that can choose a microphone can use it like
+a regular input device.
 
-## Current Status
+## What It Does
 
-The code path for capture, translation, virtual-mic output, onboarding,
-permission checks, and driver management is implemented. The remaining release
-gate is manual product acceptance on real macOS hardware with a real microphone,
-OpenAI API key, and meeting apps.
+- Translates live speech into a virtual microphone.
+- Lets meeting apps hear the translated voice instead of the original mic.
+- Supports silence, pass-through, translated voice, and translated voice mixed
+  with the original.
+- Shows captions, latency, connection state, usage estimates, and driver status.
+- Keeps the OpenAI API key and local app data on the Mac.
 
-Authoritative docs:
+## How It Works
 
-| Document | Purpose |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime model, component boundaries, privacy and HAL invariants. |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local setup, driver lifecycle, build/test commands, and probes. |
-| [docs/STATUS.md](docs/STATUS.md) | Current implementation status and acceptance checklist. |
-| [docs/RUNBOOK-acceptance.md](docs/RUNBOOK-acceptance.md) | Manual A1-A12 acceptance flow for real hardware and meeting apps. |
+Intervox runs as a Tauri desktop app with a small macOS audio driver. The app
+captures a selected microphone, sends speech to OpenAI Realtime with the user's
+own API key, receives translated audio, and writes it to the virtual microphone.
+
+The product name shown in the UI is **Translator Mic**. macOS and some audio
+selectors may show the underlying device as **Intervox**.
+
+## Status
+
+The app path for capture, translation, virtual-mic output, onboarding,
+permission checks, and driver management is implemented.
+
+The remaining release gate is hands-on acceptance on real macOS hardware with a
+real microphone, OpenAI API key, and meeting apps. The manual checklist lives in
+[docs/RUNBOOK-acceptance.md](docs/RUNBOOK-acceptance.md).
 
 ## Requirements
 
 - macOS 14 Sonoma or later.
 - Rust 1.94.0, pinned by `rust-toolchain.toml`.
 - Xcode Command Line Tools.
-- Node.js 24.2.0 plus pnpm 10.21.0.
-- `cmake` and `ninja` for the HAL driver.
-- Apple Developer ID Application certificate for signed app and driver builds.
-- Apple notarytool credentials for notarized release app and driver builds.
+- Node.js 24.2.0 and pnpm 10.21.0.
+- `cmake` and `ninja` for the audio driver.
 - OpenAI API key for live translation.
+- Apple Developer ID Application certificate and notarytool credentials for
+  signed release builds.
 
 ## Quick Start
 
-Install JavaScript dependencies:
+Install dependencies:
 
 ```bash
 pnpm install
 ```
 
-Run the fast logic and frontend checks:
+Run the fast checks:
 
 ```bash
 cargo test --workspace
@@ -51,87 +62,78 @@ pnpm test
 pnpm check
 ```
 
-Run the Tauri app in development mode:
+Run the app in development mode:
 
 ```bash
 pnpm tauri dev
 ```
 
-The app will open the first-run onboarding flow when setup is incomplete.
+When setup is incomplete, Intervox opens the first-run onboarding flow.
 
-Build the packaged macOS app:
+## Build
 
-```bash
-pnpm run build:app
-```
-
-`build:app` is the release path and requires Developer ID plus notarytool
-credentials because the bundled driver must pass the app's install trust gate.
-For a local unsigned development package:
+Build a local unsigned development app:
 
 ```bash
 pnpm run build:app:dev
 ```
 
-Build a release candidate explicitly:
+Build the signed and notarized release app:
 
 ```bash
-pnpm run build:app:release
+pnpm run build:app
 ```
 
-## Driver Lifecycle
+`build:app` is the release path. It requires Developer ID and notarytool
+credentials because the app bundle includes the audio driver.
 
-Build the HAL driver:
+## Driver
+
+Build the driver:
 
 ```bash
 scripts/build_driver.sh
 ```
 
-The app build script runs the driver build before packaging because the app
-bundle includes `driver/build/Intervox.driver` as a resource.
-
-Sign and notarize the driver before release or full local acceptance:
+Sign and notarize it for release or full local acceptance:
 
 ```bash
 scripts/sign_driver.sh
 scripts/notarize_driver.sh
 ```
 
-Install the driver:
+Install it locally:
 
 ```bash
 INTERVOX_ASSUME_YES=1 sudo bash scripts/install_driver.sh
 ```
 
-The app also exposes an in-app privileged install path during onboarding and in
-the Status pane.
+The app also supports privileged driver install, update, and uninstall from
+onboarding and the Status pane.
 
-Product UI calls the virtual input **Translator Mic**. CoreAudio may expose the
-device name as **Intervox** in system and meeting-app selectors.
+## Local Data
 
-## Config and API Key
-
-Intervox stores app settings and the OpenAI API key in:
+Intervox stores settings and the OpenAI API key in:
 
 ```text
 ~/Library/Application Support/app.intervox.desktop/config.json
 ```
 
-The config directory is written with user-only permissions and the config file
-is written with mode `600`. The OpenAI API key is stored in this local config
-file and is not returned to the frontend by the config IPC command.
+The config directory uses user-only permissions, and the config file is written
+with mode `600`. The key is never returned to the frontend by the config IPC
+command.
 
-Other local app data is stored under the same app-data directory:
+Other local files live in the same app-data directory:
 
 | File or directory | Purpose |
 |---|---|
-| `usage.json` | Local month and lifetime usage estimate from translation audio sent to OpenAI. |
-| `transcripts/*.jsonl` | Per-session source/target transcript history when transcript saving is enabled. |
-| `connection.log` | Capped connection lifecycle log for troubleshooting; no audio, transcript text, or keys. |
+| `usage.json` | Local month and lifetime usage estimate. |
+| `transcripts/*.jsonl` | Per-session transcript history when transcript saving is enabled. |
+| `connection.log` | Capped connection lifecycle log for troubleshooting. |
 
 Do not commit local secret files such as `apikey.secret` or `password.secret`.
 
-## Manual Acceptance
+## Acceptance
 
 Before calling a build release-ready, run the full manual runbook:
 
@@ -139,5 +141,15 @@ Before calling a build release-ready, run the full manual runbook:
 docs/RUNBOOK-acceptance.md
 ```
 
-The runbook checks the audio modes, Translate original-voice mix, captions, quit/restart behavior,
-privacy/logging, and smoke tests in Zoom, Google Meet, and QuickTime.
+The runbook checks audio modes, translated voice, original-voice mix, captions,
+quit and restart behavior, privacy and logging, plus smoke tests in Zoom, Google
+Meet, and QuickTime.
+
+## Docs
+
+| Document | Purpose |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime model, component boundaries, privacy model, and audio-driver invariants. |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local setup, driver lifecycle, build/test commands, and probes. |
+| [docs/STATUS.md](docs/STATUS.md) | Current implementation status and acceptance checklist. |
+| [docs/RUNBOOK-acceptance.md](docs/RUNBOOK-acceptance.md) | Manual A1-A12 acceptance flow for real hardware and meeting apps. |
