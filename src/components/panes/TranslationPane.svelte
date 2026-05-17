@@ -15,7 +15,7 @@
     <span
       style={css({
         cursor: "pointer",
-        color: "var(--c-mixed)",
+        color: "var(--c-accent)",
         textDecoration: "underline",
         textUnderlineOffset: 2,
       })}
@@ -72,17 +72,17 @@
           borderRadius: 6,
           cursor: "pointer",
           background: selected
-            ? "color-mix(in oklch, var(--c-mixed) 14%, transparent)"
+            ? "color-mix(in oklch, var(--c-accent) 14%, transparent)"
             : "transparent",
           border: selected
-            ? "0.5px solid color-mix(in oklch, var(--c-mixed) 35%, transparent)"
+            ? "0.5px solid color-mix(in oklch, var(--c-accent) 35%, transparent)"
             : "0.5px solid transparent",
         })}
       >
         <LangChip code={l.code} size={16} />
         <span style={css({ fontSize: 12.5, fontWeight: selected ? 500 : 400 })}>{l.name}</span>
         {#if selected}
-          <span style={css({ marginLeft: "auto", color: "var(--c-mixed)" })}>
+          <span style={css({ marginLeft: "auto", color: "var(--c-accent)" })}>
             <Check size={10} />
           </span>
         {/if}
@@ -147,7 +147,7 @@
             borderRadius: 6,
             cursor: "pointer",
             background: selected
-              ? "color-mix(in oklch, var(--c-mixed) 14%, transparent)"
+              ? "color-mix(in oklch, var(--c-accent) 14%, transparent)"
               : "transparent",
             fontSize: 12.5,
           })}
@@ -179,9 +179,9 @@
   <Row last>
     <RowLabel
       title="Original voice volume"
-      sub={store.mode === "mixed"
-        ? "Keeps a quiet trace of your voice under the translation."
-        : "Only available in Translate + Original."}
+      sub={store.mode === "translate"
+        ? "0% sends translated speech only; higher values keep your voice underneath."
+        : "Available when Translator Mic is in Translate mode."}
     />
     <div
       style={css({
@@ -189,7 +189,7 @@
         display: "flex",
         alignItems: "center",
         gap: 10,
-        opacity: store.mode === "mixed" ? 1 : 0.45,
+        opacity: store.mode === "translate" ? 1 : 0.45,
       })}
     >
       <span style={css({ fontSize: 11, color: "var(--txt-3)" })}>0%</span>
@@ -198,7 +198,7 @@
         min={0}
         max={30}
         onChange={(v) => store.setMixPercent(v)}
-        disabled={store.mode !== "mixed"}
+        disabled={store.mode !== "translate"}
       />
       <span style={css({ fontSize: 11, color: "var(--txt-3)" })}>30%</span>
       <span

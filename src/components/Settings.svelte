@@ -13,11 +13,11 @@
   import AdvancedPane from "./panes/AdvancedPane.svelte";
 
   const SIDEBAR = [
-    { id: "status",      label: "Status",      tint: "var(--c-mixed)" },
-    { id: "account",     label: "Account",     tint: "var(--c-mixed)" },
+    { id: "status",      label: "Status",      tint: "var(--c-accent)" },
+    { id: "account",     label: "Account",     tint: "var(--c-accent)" },
     { id: "audio",       label: "Audio",       tint: "var(--c-pass)" },
     { id: "translation", label: "Translation", tint: "var(--c-translate)" },
-    { id: "captions",    label: "Captions",    tint: "var(--c-mixed)" },
+    { id: "captions",    label: "Captions",    tint: "var(--c-accent)" },
     { id: "shortcuts",   label: "Shortcuts",   tint: "var(--c-silence)" },
     { id: "privacy",     label: "Privacy",     tint: "var(--c-translate)" },
     { id: "advanced",    label: "Advanced",    tint: "var(--c-silence)" },
@@ -83,11 +83,11 @@
           height: 26,
           borderRadius: 7,
           background:
-            "linear-gradient(135deg, color-mix(in oklch, var(--c-mixed) 75%, white) 0%, var(--c-mixed) 100%)",
+            "linear-gradient(135deg, color-mix(in oklch, var(--c-accent) 75%, white) 0%, var(--c-accent) 100%)",
           display: "grid",
           placeItems: "center",
           boxShadow:
-            "0 3px 8px -2px color-mix(in oklch, var(--c-mixed) 60%, transparent)",
+            "0 3px 8px -2px color-mix(in oklch, var(--c-accent) 60%, transparent)",
         })}
       >
         <Glyph size={15} color="#fff" />
@@ -130,7 +130,7 @@
             padding: "5px 8px",
             borderRadius: 6,
             background: active
-              ? "var(--c-mixed)"
+              ? "var(--c-accent)"
               : over
                 ? "var(--row-hover)"
                 : "transparent",

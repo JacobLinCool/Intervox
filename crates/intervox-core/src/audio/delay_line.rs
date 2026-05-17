@@ -1,6 +1,6 @@
-//! Delay line for TranslateWithOriginal (spec §7.4). The original voice must
-//! be delayed so it roughly aligns with the much later translated audio,
-//! otherwise the original races ahead of the translation.
+//! Delay line for Translate with original voice. The original voice must be
+//! delayed so it roughly aligns with the much later translated audio, otherwise
+//! the original races ahead of the translation.
 
 /// original_delay_ms = translation_latency_ms - 100, clamped to [300, 2500].
 pub fn compute_original_delay_ms(translation_latency_ms: u32) -> u32 {

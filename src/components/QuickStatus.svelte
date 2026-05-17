@@ -7,7 +7,7 @@
 
   // Derived from store
   const meta = $derived(MODES.find((m) => m.id === store.mode) ?? MODES[2]);
-  const isTranslating = $derived(store.mode === "translate" || store.mode === "mixed");
+  const isTranslating = $derived(store.isTranslating);
   const isError = $derived(!!store.lastError);
   const vuLevel = $derived((!isError && (isTranslating || store.mode === "pass")) ? store.outputLevel : 0);
   const vuColor = $derived(store.mode === "pass" ? "var(--c-pass)" : meta.color);
@@ -158,7 +158,7 @@
           padding: "5px 10px",
           borderRadius: 6,
           cursor: "default",
-          background: over ? "var(--c-mixed)" : "transparent",
+          background: over ? "var(--c-accent)" : "transparent",
           color: over ? "#fff" : "var(--txt-1)",
         })}
       >
@@ -287,7 +287,7 @@
         padding: "6px 10px",
         borderRadius: 6,
         cursor: "default",
-        background: rowHover["captions"] ? "var(--c-mixed)" : "transparent",
+        background: rowHover["captions"] ? "var(--c-accent)" : "transparent",
         color: rowHover["captions"] ? "#fff" : "var(--txt-1)",
         transition: "background 80ms, color 80ms",
       })}
@@ -313,7 +313,7 @@
         padding: "6px 10px",
         borderRadius: 6,
         cursor: "default",
-        background: rowHover["settings"] ? "var(--c-mixed)" : "transparent",
+        background: rowHover["settings"] ? "var(--c-accent)" : "transparent",
         color: rowHover["settings"] ? "#fff" : "var(--txt-1)",
         transition: "background 80ms, color 80ms",
       })}
@@ -337,7 +337,7 @@
         padding: "6px 10px",
         borderRadius: 6,
         cursor: "default",
-        background: rowHover["setup"] ? "var(--c-mixed)" : "transparent",
+        background: rowHover["setup"] ? "var(--c-accent)" : "transparent",
         color: rowHover["setup"] ? "#fff" : "var(--txt-1)",
         transition: "background 80ms, color 80ms",
       })}
@@ -363,7 +363,7 @@
         padding: "6px 10px",
         borderRadius: 6,
         cursor: "default",
-        background: rowHover["quit"] ? "var(--c-mixed)" : "transparent",
+        background: rowHover["quit"] ? "var(--c-accent)" : "transparent",
         color: rowHover["quit"] ? "#fff" : "var(--txt-1)",
         transition: "background 80ms, color 80ms",
       })}

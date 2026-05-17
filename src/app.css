@@ -5,7 +5,7 @@
     --c-silence:   oklch(0.66 0.012 260);
     --c-pass:      oklch(0.62 0.165 245);
     --c-translate: oklch(0.66 0.155 155);
-    --c-mixed:     oklch(0.62 0.180 295);
+    --c-accent:     oklch(0.62 0.180 295);
     --c-error:     oklch(0.63 0.190 25);
 
     /* Light mode (default) */
@@ -16,7 +16,7 @@
     --win-shadow:  0 24px 60px -12px rgba(20, 18, 40, 0.35), 0 2px 6px rgba(0,0,0,0.10), 0 0 0 0.5px rgba(0,0,0,0.10);
     --sidebar-bg:  rgba(232, 232, 236, 0.55);
     --row-hover:   rgba(0,0,0,0.045);
-    --row-select: var(--c-mixed);
+    --row-select: var(--c-accent);
 
     --txt-1: #1d1d1f;
     --txt-2: rgba(60, 60, 67, 0.78);
@@ -138,12 +138,12 @@
   .btn:hover { background: var(--row-hover); }
   .btn:active { transform: scale(0.98); }
   .btn.primary {
-    background: var(--c-mixed);
+    background: var(--c-accent);
     color: white;
     border-color: transparent;
     box-shadow: 0 1px 0 rgba(0,0,0,0.08) inset, 0 1px 2px rgba(0,0,0,0.15);
   }
-  .btn.primary:hover { filter: brightness(1.06); background: var(--c-mixed); }
+  .btn.primary:hover { filter: brightness(1.06); background: var(--c-accent); }
   .btn.ghost { background: transparent; border-color: transparent; }
   .btn.ghost:hover { background: var(--row-hover); }
 
@@ -206,7 +206,7 @@
 
   /* Focus rings */
   .ring:focus-visible {
-    outline: 3px solid color-mix(in oklch, var(--c-mixed) 50%, transparent);
+    outline: 3px solid color-mix(in oklch, var(--c-accent) 50%, transparent);
     outline-offset: 1px;
   }
 

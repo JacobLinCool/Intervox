@@ -181,10 +181,7 @@ fn execute_shortcut_action(app: &tauri::AppHandle, action: ShortcutAction) {
     match action {
         ShortcutAction::ToggleTranslate => {
             let current_mode = h.state.lock().unwrap().status.mode;
-            let new_mode = if matches!(
-                current_mode,
-                VirtualMicMode::Translate | VirtualMicMode::TranslateWithOriginal
-            ) {
+            let new_mode = if matches!(current_mode, VirtualMicMode::Translate) {
                 VirtualMicMode::Silence
             } else {
                 VirtualMicMode::Translate

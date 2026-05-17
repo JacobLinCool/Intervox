@@ -196,7 +196,7 @@
         <a
           href="https://platform.openai.com"
           onclick={(e) => { e.preventDefault(); store.openExternalUrl("https://platform.openai.com"); }}
-          style={css({ fontSize: 12.5, color: "var(--c-mixed)", textDecoration: "none", cursor: "pointer" })}
+          style={css({ fontSize: 12.5, color: "var(--c-accent)", textDecoration: "none", cursor: "pointer" })}
         >
           platform.openai.com ↗
         </a>
@@ -212,11 +212,11 @@
     padding: 14,
     display: "flex",
     gap: 12,
-    background: "color-mix(in oklch, var(--c-mixed) 6%, var(--card-bg))",
-    borderColor: "color-mix(in oklch, var(--c-mixed) 22%, var(--card-border))",
+    background: "color-mix(in oklch, var(--c-accent) 6%, var(--card-bg))",
+    borderColor: "color-mix(in oklch, var(--c-accent) 22%, var(--card-border))",
   })}
 >
-  <div style={css({ color: "var(--c-mixed)", marginTop: 1 })}>
+  <div style={css({ color: "var(--c-accent)", marginTop: 1 })}>
     <SidebarIcon name="privacy" />
   </div>
   <div style={css({ fontSize: 12.5, lineHeight: 1.55, color: "var(--txt-2)" })}>

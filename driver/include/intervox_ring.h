@@ -32,7 +32,6 @@ typedef enum {
     INTERVOX_MODE_SILENCE = 0,
     INTERVOX_MODE_PASS_THROUGH = 1,
     INTERVOX_MODE_TRANSLATE = 2,
-    INTERVOX_MODE_TRANSLATE_WITH_ORIGINAL = 3,
 } intervox_mode_t;
 
 typedef struct {

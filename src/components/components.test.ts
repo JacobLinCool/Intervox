@@ -26,11 +26,11 @@ describe("AccountPane", () => {
 import AudioPane from "./panes/AudioPane.svelte";
 import { render as r3 } from "@testing-library/svelte";
 describe("AudioPane", () => {
-  it("renders 4 mode cards and honest 'no input devices' when device list empty", () => {
-    const { container, getAllByText } = r3(AudioPane as any);
+  it("renders 3 mode cards and honest 'no input devices' when device list empty", () => {
+    const { container } = r3(AudioPane as any);
     expect(container.innerHTML).toContain("Output Mode");
-    // 4 modes from MODES
-    expect(container.innerHTML).toContain("Translate + Original");
+    expect(container.innerHTML).toContain("Translate");
+    expect(container.innerHTML).not.toContain("Translate + Original");
     // honest: with store uninitialized, no fabricated mic names
     expect(container.innerHTML).not.toContain("MacBook Pro Microphone");
     expect(container.innerHTML).not.toContain("Shure MV7");
@@ -54,7 +54,7 @@ describe("AudioPane", () => {
 import TranslationPane from "./panes/TranslationPane.svelte";
 import { render as r4 } from "@testing-library/svelte";
 describe("TranslationPane", () => {
-  it("renders languages, performance, and disables mix slider unless mixed mode", () => {
+  it("renders languages, performance, and original voice mix control", () => {
     const { container, getByText } = r4(TranslationPane as any);
     expect(container.innerHTML).toContain("Target language");
     expect(container.innerHTML).toContain("Original voice volume");

@@ -24,15 +24,13 @@ export type ErrorKind = "network" | "mic" | "driver" | "permission" | null;
 export function indicatorState(
   mode: UiMode,
   err: ErrorKind,
-): "error" | "off" | "pass" | "translate" | "mixed" {
+): "error" | "off" | "pass" | "translate" {
   if (err) return "error";
   return mode === "silence"
     ? "off"
     : mode === "pass"
       ? "pass"
-      : mode === "translate"
-        ? "translate"
-        : "mixed";
+      : "translate";
 }
 
 export type ChipView = { tone: "ok" | "warn" | "error" | "neutral"; text: string };
@@ -246,11 +244,11 @@ class Store {
   }
 
   get isTranslating(): boolean {
-    return (this.mode === "translate" || this.mode === "mixed") && !this.errorKind;
+    return this.mode === "translate" && !this.errorKind;
   }
 
   get mixPercent(): number {
-    return this.config?.mix.original_voice_percent ?? 15;
+    return this.config?.mix.original_voice_percent ?? 0;
   }
 
   get latencyPref(): UiLatency {

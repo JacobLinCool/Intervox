@@ -20,7 +20,7 @@
 />
 
 <FieldGroup title="Output Mode">
-  <div style={css({ padding: 14, display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 })}>
+  <div style={css({ padding: 14, display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 10 })}>
     {#each MODES as m (m.id)}
       <ModeCard
         meta={m}
@@ -58,7 +58,7 @@
       />
     {/if}
     <div style={css({ marginLeft: "auto", width: 120 })}>
-      <VUStrip level={store.inputLevel} color="var(--c-mixed)" />
+      <VUStrip level={store.inputLevel} color="var(--c-accent)" />
       <div style={css({ marginTop: 4, textAlign: "right", fontSize: 10.5, color: "var(--txt-3)" })}>
         {formatDbfs(store.inputLevel)}
       </div>

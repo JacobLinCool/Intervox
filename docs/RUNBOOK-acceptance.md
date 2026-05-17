@@ -176,10 +176,11 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 ### A3 — Translate mode: meeting app hears translated speech only
 
 **Action.**
-1. Select the **Translate** mode card (label: "Translate — Only translated speech is sent.") or the tray item **Translate**.
-2. In the **Translation** pane, confirm the target language is the intended output (the source language is auto-detected by the endpoint — there is no source selector).
-3. Speak a sentence in the source language.
-4. Listen to what the meeting app receives. It should be in the target language only.
+1. Select the **Translate** mode card or the tray item **Translate**.
+2. In the **Translation** pane, set **Original voice volume** to `0%`.
+3. Confirm the target language is the intended output (the source language is auto-detected by the endpoint — there is no source selector).
+4. Speak a sentence in the source language.
+5. Listen to what the meeting app receives. It should be in the target language only.
 
 **Expected observation.**
 - The meeting app hears translated speech in the target language.
@@ -193,16 +194,17 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 ---
 
-### A4 — Translate + Original mode: meeting app hears translated speech with faint delayed original
+### A4 — Translate with original voice: meeting app hears translated speech with faint delayed original
 
 **Action.**
-1. Select the **Translate + Original** mode card (label: "Translate + Original — Translated speech is sent with your original voice quietly underneath.") or the tray item **Translate + Original**.
-2. Speak a sentence in the source language.
-3. Listen to what the meeting app receives.
+1. Select the **Translate** mode card or the tray item **Translate**.
+2. In the **Translation** pane, set **Original voice volume** above `0%` (for example, `15%`).
+3. Speak a sentence in the source language.
+4. Listen to what the meeting app receives.
 
 **Expected observation.**
 - The meeting app hears the translated speech prominently.
-- A faint, delayed version of your original voice is audible underneath (default original volume is 15% per config default; default translated volume is 100%).
+- A faint, delayed version of your original voice is audible underneath (for example, 15% original voice; translated voice remains 100%).
 - The Intervox Status pane shows "Translation service connected".
 - Both Input and Output meters are active.
 
@@ -215,7 +217,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 ### A5 — Captions show live source and target text
 
 **Action.**
-1. With the app in **Translate** or **Translate + Original** mode and an active OpenAI session.
+1. With the app in **Translate** mode and an active OpenAI session.
 2. Open the dedicated captions window via one of:
    - **Captions** pane > "Pop-out captions window" toggle (enable the "Floating captions" toggle first, then toggle "Pop-out captions window").
    - Tray menu > **Captions**.
@@ -379,12 +381,12 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 
 1. Set mode to **Silence**. Confirm Zoom input meter shows zero.
 2. Set mode to **Pass-through**. Speak and confirm Zoom input meter shows activity and audio is clear.
-3. Set mode to **Translate**. Speak in the source language. Confirm Zoom input meter shows activity and the audio received is in the target language only.
-4. Set mode to **Translate + Original**. Speak in the source language. Confirm Zoom receives translated speech with faint original underneath.
+3. Set mode to **Translate** with **Original voice volume** at `0%`. Speak in the source language. Confirm Zoom input meter shows activity and the audio received is in the target language only.
+4. Keep **Translate** selected and raise **Original voice volume** above `0%`. Speak in the source language. Confirm Zoom receives translated speech with faint original underneath.
 
-**Expected observation.** All four mode behaviors from A1–A4 are reproduced with Zoom as the consumer of the Translator Mic input.
+**Expected observation.** All behaviors from A1–A4 are reproduced with Zoom as the consumer of the Translator Mic input.
 
-**PASS criterion.** Silence = zero level in Zoom; Pass-through = original voice in Zoom; Translate = translated-only voice in Zoom; Translate+Original = translated + quiet original in Zoom.
+**PASS criterion.** Silence = zero level in Zoom; Pass-through = original voice in Zoom; Translate at 0% original = translated-only voice in Zoom; Translate above 0% original = translated + quiet original in Zoom.
 
 - [ ] **A10 PASS**
 
@@ -394,16 +396,16 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 
 **Prerequisite:** Google Chrome or Safari with a Google account. "Translator Mic" is selected in Meet's audio settings (gear icon > Audio > Microphone).
 
-**Action.** Open a Google Meet call (a personal meeting room or an echo test). Perform the same four checks as A10:
+**Action.** Open a Google Meet call (a personal meeting room or an echo test). Perform the same checks as A10:
 
 1. Silence: Meet input meter is zero.
 2. Pass-through: Meet hears original voice.
-3. Translate: Meet hears translated-only voice.
-4. Translate + Original: Meet hears translated with faint original.
+3. Translate with original voice at `0%`: Meet hears translated-only voice.
+4. Translate with original voice above `0%`: Meet hears translated with faint original.
 
 **Expected observation.** Same as A10 but via Meet's WebRTC audio stack.
 
-**PASS criterion.** All four modes behave correctly in Google Meet's microphone input.
+**PASS criterion.** All output behaviors behave correctly in Google Meet's microphone input.
 
 - [ ] **A11 PASS**
 
@@ -416,12 +418,12 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 **Action.**
 1. Set mode to **Silence**. Press record. Observe the QuickTime level meter. Stop recording. Confirm the recorded audio is silent.
 2. Set mode to **Pass-through**. Press record, speak for 5 seconds, stop. Play back the recording. Confirm your original voice is heard.
-3. Set mode to **Translate**. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech only is heard.
-4. Set mode to **Translate + Original**. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech with faint original.
+3. Set mode to **Translate** with **Original voice volume** at `0%`. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech only is heard.
+4. Keep **Translate** selected and raise **Original voice volume** above `0%`. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech with faint original.
 
-**Expected observation.** The CoreAudio capture path (used by QuickTime) correctly reflects all four modes just as meeting apps do. This validates the HAL driver layer independently of meeting-app WebRTC.
+**Expected observation.** The CoreAudio capture path (used by QuickTime) correctly reflects all output behaviors just as meeting apps do. This validates the HAL driver layer independently of meeting-app WebRTC.
 
-**PASS criterion.** Silence recording is silent; Pass-through recording contains original voice; Translate recording contains translated-only voice; Translate+Original recording contains translated speech with faint original underneath.
+**PASS criterion.** Silence recording is silent; Pass-through recording contains original voice; Translate at 0% original contains translated-only voice; Translate above 0% original contains translated speech with faint original underneath.
 
 - [ ] **A12 PASS**
 
@@ -444,7 +446,7 @@ Fill in this table after completing all steps. Date, tester name, and SHA of the
 | A1 Silence | | |
 | A2 Pass-through | | |
 | A3 Translate | | |
-| A4 Translate + Original | | |
+| A4 Translate original voice mix | | |
 | A5 Captions live | | |
 | A6 App quit keeps vmic | | |
 | A7 Driver + app restart | | |

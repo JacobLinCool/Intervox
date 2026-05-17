@@ -1,4 +1,4 @@
-//! Pure DSP-chain helpers for the Translate / TranslateWithOriginal downlink.
+//! Pure DSP-chain helpers for the Translate downlink.
 //!
 //! Extracted into a standalone module so the unit test and the real `ev_task` /
 //! `pull_task` both call the **same** functions (DRY — no duplication).
@@ -17,7 +17,7 @@
 //!   → Limiter.process            (optional; clips to LIMITER_CEILING)
 //! ```
 //!
-//! # Chain (TranslateWithOriginal — Task 4.3)
+//! # Chain (Translate with original voice)
 //!
 //! In addition to the translated downlink, the original 48 kHz mono mic frames
 //! are tapped into a bounded `SharedOriginalQueue` (max 2 s = 96 000 samples).
@@ -29,7 +29,7 @@
 //! graph::route_frame (mic_to_openai + mix_original):
 //!   frame (48 kHz mono f32) → SharedOriginalQueue.push_back (bounded, drop oldest)
 //!
-//! pull_task (10 ms tick, TranslateWithOriginal):
+//! pull_task (10 ms tick, original voice percent > 0):
 //!   translated_block (from JitterBuffer)
 //!   original_480     (drained from SharedOriginalQueue, zero-padded)
 //!     → DelayLine.process(original_480)  → delayed_original
@@ -62,7 +62,7 @@ use super::capture::downmix_to_mono;
 // ── Task 4.3: SharedOriginalQueue ─────────────────────────────────────────────
 
 /// A bounded queue of 48 kHz mono f32 samples tapped from the mic in
-/// `TranslateWithOriginal` mode.  Shared between the graph (push) and pull
+/// Translate's original-voice mix path. Shared between the graph (push) and pull
 /// (drain) tasks via `Arc<parking_lot::Mutex<_>>`.
 ///
 /// Bound: 2 seconds × 48 000 Hz = 96 000 samples.  When the queue would
@@ -112,7 +112,8 @@ pub fn drain_original_samples(queue: &SharedOriginalQueue, n: usize) -> Vec<f32>
 // ── Task 4.3: estimated translation latency constant ─────────────────────────
 
 /// Estimated one-way translation latency (ms) used to initialise the delay
-/// line for the original-voice tap in `TranslateWithOriginal` mode.
+/// line for the original-voice tap used by Translate when original voice
+/// percent is positive.
 ///
 /// The delay is computed from this value via
 /// `intervox_core::audio::delay_line::compute_original_delay_ms(EST_LATENCY_MS)`.

@@ -209,7 +209,7 @@ fn selfcheck() -> i32 {
     // Config / dB math
     let c = Config::default();
     check!("config default version 1", c.version == 1);
-    check!("config mix default 15%", c.mix.original_voice_percent == 15);
+    check!("config mix default 0%", c.mix.original_voice_percent == 0);
     check!(
         "percent<->db round trip",
         (db_to_percent(percent_to_db(15.0)) - 15.0).abs() < 0.02
@@ -228,14 +228,14 @@ fn selfcheck() -> i32 {
     );
 
     // Pipeline non-negotiable rules (§19)
-    let sil = pipeline::route(VirtualMicMode::Silence);
+    let sil = pipeline::route(VirtualMicMode::Silence, c.mix.original_voice_percent);
     check!(
         "silence: vmic silent + no openai",
         sil.vmic_silence && !sil.openai_connected
     );
-    let pt = pipeline::route(VirtualMicMode::PassThrough);
+    let pt = pipeline::route(VirtualMicMode::PassThrough, c.mix.original_voice_percent);
     check!("passthrough: no openai cost", !pt.openai_connected);
-    let tr = pipeline::route(VirtualMicMode::Translate);
+    let tr = pipeline::route(VirtualMicMode::Translate, 0);
     check!(
         "translate: no original leak",
         !tr.mic_to_vmic && !tr.mix_original

@@ -25,8 +25,8 @@
       ? { dot: "var(--c-silence)",    text: "Silence · No audio is being sent" }
       : isPass
       ? { dot: "var(--c-pass)",       text: "Pass-through · Original microphone only" }
-      : store.mode === "mixed"
-      ? { dot: "var(--c-mixed)",      text: `${store.langPairText} · Translation + quiet original · ${store.latencyText}` }
+      : store.mixPercent > 0
+      ? { dot: "var(--c-translate)",  text: `${store.langPairText} · Translation + original ${store.mixPercent}% · ${store.latencyText}` }
       :   { dot: "var(--c-translate)", text: `${store.langPairText} · Translating · ${store.latencyText}` }
   );
 
@@ -127,14 +127,14 @@
             fontSize: 12,
             lineHeight: 1.45,
           })}>
-            <span style={css({ color: "var(--c-mixed)", marginTop: 1 })}>
+            <span style={css({ color: "var(--c-accent)", marginTop: 1 })}>
               <svg width="14" height="14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M8 4.5v4M8 10.6v0.6" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
             </span>
             <div>
               <div style={css({ color: "#fff", fontWeight: 500, marginBottom: 1 })}>
                 You're already speaking {store.targetLang.name}
               </div>
-              Intervox may stay quiet on these segments. Switch to Translate + Original if you often code-switch.
+              Intervox may stay quiet on these segments. Raise original voice volume if you often code-switch.
             </div>
           </div>
         {/if}

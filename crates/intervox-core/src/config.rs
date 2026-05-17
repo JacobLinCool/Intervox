@@ -74,7 +74,7 @@ pub struct MixConfig {
 impl Default for MixConfig {
     fn default() -> Self {
         Self {
-            original_voice_percent: 15,
+            original_voice_percent: 0,
             translated_voice_percent: 100,
             duck_original: true,
         }
@@ -225,6 +225,14 @@ impl Config {
                 self.version
             )));
         }
+        match self.audio.virtual_mic_mode.as_str() {
+            "silence" | "pass_through" | "translate" => {}
+            mode => {
+                return Err(AppError::invalid_config(format!(
+                    "unsupported virtual_mic_mode {mode}"
+                )));
+            }
+        }
         self.mix.original_voice_percent = self.mix.original_voice_percent.min(30);
         self.mix.translated_voice_percent = self.mix.translated_voice_percent.min(100);
         Ok(())
@@ -243,7 +251,7 @@ mod tests {
         assert!(c.audio.limiter_enabled);
         assert_eq!(c.translation.target_language, "en");
         assert_eq!(c.translation.quality_mode, "balanced");
-        assert_eq!(c.mix.original_voice_percent, 15);
+        assert_eq!(c.mix.original_voice_percent, 0);
         assert_eq!(c.mix.translated_voice_percent, 100);
         assert!(c.mix.duck_original);
         assert!(c.captions.enabled);
@@ -275,6 +283,13 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_removed_original_mix_mode() {
+        let mut c = Config::default();
+        c.audio.virtual_mic_mode = "translate_with_original".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
     fn rejects_unknown_version() {
         let mut c = Config {
             version: 99,
@@ -300,7 +315,7 @@ mod tests {
     #[test]
     fn partial_json_uses_defaults_for_missing_sections() {
         let cfg: Config = serde_json::from_str(r#"{"version":1}"#).unwrap();
-        assert_eq!(cfg.mix.original_voice_percent, 15);
+        assert_eq!(cfg.mix.original_voice_percent, 0);
         assert_eq!(cfg.translation.target_language, "en");
     }
 

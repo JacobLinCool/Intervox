@@ -261,7 +261,7 @@
       </div>
       <VUStrip
         level={!hasError && store.mode !== "silence" ? store.inputLevel : 0}
-        color="var(--c-mixed)"
+        color="var(--c-accent)"
         seed={1}
         height={6}
       />
@@ -269,7 +269,7 @@
         <VUBars
           level={!hasError && store.mode !== "silence" ? store.inputLevel : 0}
           bars={28}
-          color="var(--c-mixed)"
+          color="var(--c-accent)"
           height={18}
           barWidth={3}
           seed={6}
@@ -306,7 +306,9 @@
             ? "Original voice"
             : store.mode === "silence"
               ? "Silenced"
-              : "Translated voice"} · {formatDbfs(store.outputLevel)}
+              : store.mixPercent > 0
+                ? `Translated + original ${store.mixPercent}%`
+                : "Translated voice"} · {formatDbfs(store.outputLevel)}
         </span>
       </div>
       <VUStrip

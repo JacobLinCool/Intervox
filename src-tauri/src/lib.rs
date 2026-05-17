@@ -373,7 +373,7 @@ pub fn run() {
             use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
             use tauri::tray::TrayIconBuilder;
 
-            // Build the 4 mode CheckMenuItems (radio-style via manual check management).
+            // Build the 3 mode CheckMenuItems (radio-style via manual check management).
             let mode_silence = CheckMenuItem::with_id(
                 app,
                 "mode_silence",
@@ -398,14 +398,6 @@ pub fn run() {
                 checks[2],
                 None::<&str>,
             )?;
-            let mode_translate_orig = CheckMenuItem::with_id(
-                app,
-                "mode_translate_orig",
-                "Translate + Original",
-                true,
-                checks[3],
-                None::<&str>,
-            )?;
 
             // Non-mode items.
             let sep1 = PredefinedMenuItem::separator(app)?;
@@ -421,7 +413,6 @@ pub fn run() {
                     &mode_silence,
                     &mode_passthrough,
                     &mode_translate,
-                    &mode_translate_orig,
                     &sep1,
                     &show_window,
                     &captions,
@@ -450,13 +441,11 @@ pub fn run() {
                         // ── Mode items ──────────────────────────────────────
                         id @ ("mode_silence"
                         | "mode_passthrough"
-                        | "mode_translate"
-                        | "mode_translate_orig") => {
+                        | "mode_translate") => {
                             let mode = match id {
                                 "mode_silence" => VirtualMicMode::Silence,
                                 "mode_passthrough" => VirtualMicMode::PassThrough,
-                                "mode_translate" => VirtualMicMode::Translate,
-                                _ => VirtualMicMode::TranslateWithOriginal,
+                                _ => VirtualMicMode::Translate,
                             };
                             let h = app.state::<AppHandle>();
                             let engine = app.state::<std::sync::Arc<crate::engine::Engine>>();
@@ -507,7 +496,6 @@ pub fn run() {
                 mode_silence,
                 mode_passthrough,
                 mode_translate,
-                mode_translate_orig,
             });
 
             // ── Low-frequency device poll (device list + driver status) ───────

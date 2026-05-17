@@ -155,7 +155,7 @@
         width: 16,
         height: 16,
         borderRadius: 4,
-        background: "var(--c-mixed)",
+        background: "var(--c-accent)",
         display: "grid",
         placeItems: "center",
         color: "#fff",
@@ -215,7 +215,7 @@
           }}
           onmouseenter={(e) => {
             activeIndex = options.findIndex((candidate) => candidate.value === o.value);
-            (e.currentTarget as HTMLElement).style.background = "var(--c-mixed)";
+            (e.currentTarget as HTMLElement).style.background = "var(--c-accent)";
             (e.currentTarget as HTMLElement).style.color = "#fff";
           }}
           onmouseleave={(e) => {

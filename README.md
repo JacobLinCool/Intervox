@@ -139,5 +139,5 @@ Before calling a build release-ready, run the full manual runbook:
 docs/RUNBOOK-acceptance.md
 ```
 
-The runbook checks all four audio modes, captions, quit/restart behavior,
+The runbook checks the audio modes, Translate original-voice mix, captions, quit/restart behavior,
 privacy/logging, and smoke tests in Zoom, Google Meet, and QuickTime.

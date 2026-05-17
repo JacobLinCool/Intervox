@@ -103,7 +103,7 @@
       left: 0,
       width: `${pct}%`,
       height: 4,
-      background: "var(--c-mixed)",
+      background: "var(--c-accent)",
       borderRadius: 2,
     })}
   ></div>

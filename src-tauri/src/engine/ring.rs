@@ -92,30 +92,26 @@ impl RingProducer {
 /// | Silence               |  0  |
 /// | PassThrough           |  1  |
 /// | Translate             |  2  |
-/// | TranslateWithOriginal |  3  |
 pub fn mode_to_ring_u32(mode: intervox_core::state::VirtualMicMode) -> u32 {
     use intervox_core::state::VirtualMicMode::*;
     match mode {
         Silence => 0,
         PassThrough => 1,
         Translate => 2,
-        TranslateWithOriginal => 3,
     }
 }
 
-/// Inverse of `mode_to_ring_u32`.  Any value not in {1, 2, 3} maps to
+/// Inverse of `mode_to_ring_u32`.  Any value not in {1, 2} maps to
 /// `Silence` so an invalid shared-memory value cannot emit audio.
 ///
 /// | u32 | Mode                  |
 /// |-----|-----------------------|
-/// |   3 | TranslateWithOriginal |
 /// |   2 | Translate             |
 /// |   1 | PassThrough           |
 /// |   _ | Silence               |
 pub fn mode_from_u32(v: u32) -> intervox_core::state::VirtualMicMode {
     use intervox_core::state::VirtualMicMode::*;
     match v {
-        3 => TranslateWithOriginal,
         2 => Translate,
         1 => PassThrough,
         _ => Silence,
@@ -135,10 +131,9 @@ mod tests {
         assert_eq!(mode_to_ring_u32(VirtualMicMode::Silence), 0);
         assert_eq!(mode_to_ring_u32(VirtualMicMode::PassThrough), 1);
         assert_eq!(mode_to_ring_u32(VirtualMicMode::Translate), 2);
-        assert_eq!(mode_to_ring_u32(VirtualMicMode::TranslateWithOriginal), 3);
     }
 
-    /// Round-trip: `mode_from_u32(mode_to_ring_u32(m)) == m` for all 4 modes.
+    /// Round-trip: `mode_from_u32(mode_to_ring_u32(m)) == m` for all 3 modes.
     #[test]
     fn mode_round_trip() {
         use super::mode_from_u32;
@@ -146,7 +141,6 @@ mod tests {
             VirtualMicMode::Silence,
             VirtualMicMode::PassThrough,
             VirtualMicMode::Translate,
-            VirtualMicMode::TranslateWithOriginal,
         ];
         for m in modes {
             assert_eq!(
@@ -161,6 +155,7 @@ mod tests {
     #[test]
     fn mode_from_u32_unknown_maps_to_silence() {
         use super::mode_from_u32;
+        assert_eq!(mode_from_u32(3), VirtualMicMode::Silence);
         assert_eq!(mode_from_u32(99), VirtualMicMode::Silence);
         assert_eq!(mode_from_u32(u32::MAX), VirtualMicMode::Silence);
     }

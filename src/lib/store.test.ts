@@ -12,7 +12,6 @@ describe("indicatorState", () => {
     expect(indicatorState("translate", "network")).toBe("error");
     expect(indicatorState("silence", null)).toBe("off");
     expect(indicatorState("pass", null)).toBe("pass");
-    expect(indicatorState("mixed", null)).toBe("mixed");
     expect(indicatorState("translate", null)).toBe("translate");
   });
 });
@@ -45,8 +44,5 @@ describe("connectionChip", () => {
     const v = connectionChip("translate", "idle", "—", null);
     expect(v.tone).toBe("warn");
     expect(v.text).toBe("Connecting to OpenAI…");
-  });
-  it("mixed+idle reads as connecting", () => {
-    expect(connectionChip("mixed", "idle", "—", null).tone).toBe("warn");
   });
 });

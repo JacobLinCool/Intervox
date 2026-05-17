@@ -16,8 +16,8 @@ pub struct FrameRouting {
 }
 
 impl FrameRouting {
-    pub fn for_mode(mode: VirtualMicMode) -> Self {
-        let r = route(mode);
+    pub fn for_mode_and_mix(mode: VirtualMicMode, original_voice_percent: u32) -> Self {
+        let r = route(mode, original_voice_percent);
         Self {
             mic_to_ring: r.mic_to_vmic,
             mic_to_openai: r.mic_to_openai,
@@ -36,23 +36,25 @@ mod tests {
 
     #[test]
     fn passthrough_sends_mic_to_ring_only() {
-        let g = FrameRouting::for_mode(PassThrough);
+        let g = FrameRouting::for_mode_and_mix(PassThrough, 15);
         assert!(g.mic_to_ring && !g.mic_to_openai && !g.translated_to_ring && !g.ring_silence);
     }
 
     #[test]
     fn silence_is_silent_and_offline() {
-        let g = FrameRouting::for_mode(Silence);
+        let g = FrameRouting::for_mode_and_mix(Silence, 15);
         assert!(g.ring_silence && !g.mic_to_ring && !g.openai_connected);
     }
 
     #[test]
     fn translate_never_leaks_mic_to_ring() {
-        for m in [Translate, TranslateWithOriginal] {
-            assert!(
-                !FrameRouting::for_mode(m).mic_to_ring,
-                "raw mic must not reach ring"
-            );
-        }
+        assert!(
+            !FrameRouting::for_mode_and_mix(Translate, 0).mic_to_ring,
+            "raw mic must not reach ring"
+        );
+        assert!(
+            !FrameRouting::for_mode_and_mix(Translate, 15).mic_to_ring,
+            "raw mic must not reach ring"
+        );
     }
 }

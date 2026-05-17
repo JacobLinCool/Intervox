@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 use tauri::Emitter;
 
 use capture::CaptureHandle;
-use ring::{mode_from_u32, mode_to_ring_u32, RingProducer};
+use ring::{mode_to_ring_u32, RingProducer};
 use translate_chain::{SharedOriginalQueue, OPENAI_UPLINK_QUEUE_BOUND};
 
 /// Shared slot holding the timestamp of the most recent successful uplink send.
@@ -134,10 +134,10 @@ pub struct Engine {
     /// 40 ms OpenAI chunks.
     /// See module-level doc for the rationale.
     uplink_slot: UplinkSlot,
-    /// Shared original-audio tap queue (Task 4.3): the graph loop pushes 48 kHz
-    /// mono frames here when in `TranslateWithOriginal` mode; the pull task
-    /// drains 480 samples per tick, delays them, and mixes them under the
-    /// translated audio before writing to the ring.
+    /// Shared original-audio tap queue: the graph loop pushes 48 kHz mono
+    /// frames here when Translate has a positive original voice percent; the
+    /// pull task drains 480 samples per tick, delays them, and mixes them under
+    /// the translated audio before writing to the ring.
     ///
     /// The queue is cleared (drained to zero) at session stop so no stale
     /// original audio carries over into the next session.
@@ -308,7 +308,7 @@ impl Engine {
             previous
         };
 
-        let routing = intervox_core::FrameRouting::for_mode(mode);
+        let routing = intervox_core::FrameRouting::for_mode_and_mix(mode, 0);
 
         self.ring.set_mode(mode_to_ring_u32(mode));
 
@@ -408,6 +408,28 @@ impl Engine {
         // the "closed" push pattern at the bottom of stop_openai_session_locked.
         if let Some(new_tgt) = connecting_tgt {
             self.conn_log.push("connecting", format!("target={new_tgt}"));
+        }
+    }
+
+    /// Restart the active OpenAI session so session-start audio config changes
+    /// such as original voice percent, ducking, and limiter settings take effect.
+    /// Capture continues running; only the realtime transport and pull task are
+    /// rebuilt with fresh config.
+    pub fn restart_translation_session_for_config(&self) {
+        let connecting_tgt: Option<String> = {
+            let mut g = self.inner.lock();
+            if g.realtime_task.is_some() {
+                let tgt = g.target_language.clone();
+                self.stop_openai_session_locked(&mut g);
+                self.start_openai_session_locked(&mut g);
+                Some(tgt)
+            } else {
+                None
+            }
+        };
+
+        if let Some(tgt) = connecting_tgt {
+            self.conn_log.push("connecting", format!("target={tgt}"));
         }
     }
 
@@ -553,12 +575,11 @@ impl Engine {
         // effect on the next session start.
         let limiter_enabled = cfg.audio.limiter_enabled;
 
-        // Read current mode to decide whether to enable the original-audio mix.
-        let current_mode = self.mode_atomic.load(std::sync::atomic::Ordering::Relaxed);
-        let mix_original =
-            intervox_core::FrameRouting::for_mode(ring::mode_from_u32(current_mode)).mix_original;
+        // A positive original voice percent enables the original-audio tap
+        // inside Translate. 0% is the translated-only no-leak path.
+        let mix_original = cfg.mix.original_voice_percent > 0;
 
-        // Build MixSettings from config (Task 4.3).
+        // Build MixSettings from config.
         // original_gain_db = percent_to_db(original_voice_percent)
         // translated_gain_db = 0.0 (translated always at unity gain)
         // duck_original / limiter_enabled from config.
@@ -588,8 +609,8 @@ impl Engine {
         // Shared jitter buffer: ev_task pushes, pull_task pulls.
         let jitter: SharedJitterBuf = Arc::new(Mutex::new(translate_chain::new_jitter_buffer()));
 
-        // Task 4.3: original-audio tap queue.
-        // Only created and wired for TranslateWithOriginal; stays None for Translate.
+        // Original-audio tap queue. Only created and wired when Translate has
+        // a positive original voice percent; stays None for translated-only.
         // The graph loop reads this from `original_queue_slot` on every frame.
         let original_queue: Option<SharedOriginalQueue> = if mix_original {
             let q = translate_chain::new_original_queue();
@@ -925,7 +946,7 @@ impl Engine {
         // Translate (mix_original == false):
         //   translated_block → optional limiter → ring.write → out_level
         //
-        // TranslateWithOriginal (mix_original == true):
+        // Translate with original voice (mix_original == true):
         //   translated_block + drain 480 from original_queue → DelayLine →
         //   mix_translated_with_original(settings) → ring.write → out_level
         //
@@ -995,7 +1016,7 @@ impl Engine {
                 let final_block = if let (Some(ref mut dl), Some(oq)) =
                     (delay_line.as_mut(), original_queue.as_ref())
                 {
-                    // TranslateWithOriginal path:
+                    // Translate with original voice path:
                     // 1. Drain 480 original samples (zero-pad on underrun).
                     let original_480 =
                         translate_chain::drain_original_samples(oq, translate_chain::PULL_FRAMES);
@@ -1226,7 +1247,7 @@ impl Engine {
                         let mut uplink_chunker = graph::OpenAiChunker::new();
 
                         while let Ok(frame) = rx.recv() {
-                            let mode = mode_from_u32(mode_atomic.load(Ordering::Relaxed));
+                            let mode = ring::mode_from_u32(mode_atomic.load(Ordering::Relaxed));
                             // Read the current original-queue slot under the lock
                             // (sub-microsecond: just clone the Arc option).
                             let oq = original_queue_slot.lock().clone();
@@ -1305,7 +1326,7 @@ impl Engine {
                     // Capture thread has exited.  Check if mode still needs capture.
                     let current_mode =
                         ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
-                    let routing = intervox_core::FrameRouting::for_mode(current_mode);
+                    let routing = intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
                     let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
 
                     if !mode_needs_capture {
@@ -1340,7 +1361,7 @@ impl Engine {
                     // Re-check mode after the delay.
                     let current_mode =
                         ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
-                    let routing = intervox_core::FrameRouting::for_mode(current_mode);
+                    let routing = intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
                     if !(routing.mic_to_ring || routing.mic_to_openai) {
                         return;
                     }

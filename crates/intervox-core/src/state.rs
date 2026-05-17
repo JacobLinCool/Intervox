@@ -9,25 +9,18 @@ pub enum VirtualMicMode {
     Silence,
     PassThrough,
     Translate,
-    TranslateWithOriginal,
 }
 
 impl VirtualMicMode {
-    /// Translate modes need an OpenAI session; the others must not create cost
+    /// Translate needs an OpenAI session; the others must not create cost
     /// (non-negotiable rules §19.7, §19.8).
     pub fn requires_openai(self) -> bool {
-        matches!(self, Self::Translate | Self::TranslateWithOriginal)
+        matches!(self, Self::Translate)
     }
 
     /// Only PassThrough routes the raw mic to the virtual mic.
     pub fn sends_mic_to_vmic(self) -> bool {
         matches!(self, Self::PassThrough)
-    }
-
-    /// Original mic audio only reaches the virtual mic in TranslateWithOriginal
-    /// (non-negotiable rule §19.9 — never leak original otherwise).
-    pub fn sends_original_audio(self) -> bool {
-        matches!(self, Self::TranslateWithOriginal)
     }
 }
 
@@ -61,7 +54,6 @@ pub enum Phase {
     PassThroughActive,
     ConnectingTranslation,
     Translating,
-    TranslatingWithOriginal,
     Silence,
 }
 
@@ -119,7 +111,7 @@ impl AppState {
         Self::default()
     }
 
-    /// Transition to a new mode. Returns the phase entered. Translate modes
+    /// Transition to a new mode. Returns the phase entered. Translate
     /// pass through `ConnectingTranslation` until `mark_openai_connected`.
     pub fn transition(&mut self, mode: VirtualMicMode) -> Phase {
         self.status.mode = mode;
@@ -129,9 +121,9 @@ impl AppState {
         self.phase = match mode {
             VirtualMicMode::Silence => Phase::Silence,
             VirtualMicMode::PassThrough => Phase::PassThroughActive,
-            VirtualMicMode::Translate | VirtualMicMode::TranslateWithOriginal => {
+            VirtualMicMode::Translate => {
                 if self.status.openai_connected {
-                    self.translating_phase()
+                    Phase::Translating
                 } else {
                     Phase::ConnectingTranslation
                 }
@@ -139,7 +131,7 @@ impl AppState {
         };
         self.status.translation = match mode {
             VirtualMicMode::Silence | VirtualMicMode::PassThrough => TranslationConn::Idle,
-            VirtualMicMode::Translate | VirtualMicMode::TranslateWithOriginal => {
+            VirtualMicMode::Translate => {
                 if self.status.openai_connected {
                     TranslationConn::Connected
                 } else {
@@ -154,7 +146,7 @@ impl AppState {
         self.status.openai_connected = connected;
         if self.status.mode.requires_openai() {
             self.phase = if connected {
-                self.translating_phase()
+                Phase::Translating
             } else {
                 Phase::ConnectingTranslation
             };
@@ -165,13 +157,6 @@ impl AppState {
             };
         } else {
             self.status.translation = TranslationConn::Idle;
-        }
-    }
-
-    fn translating_phase(&self) -> Phase {
-        match self.status.mode {
-            VirtualMicMode::TranslateWithOriginal => Phase::TranslatingWithOriginal,
-            _ => Phase::Translating,
         }
     }
 
@@ -194,8 +179,8 @@ mod tests {
 
     #[test]
     fn mode_serializes_snake_case() {
-        let j = serde_json::to_string(&VirtualMicMode::TranslateWithOriginal).unwrap();
-        assert_eq!(j, "\"translate_with_original\"");
+        let j = serde_json::to_string(&VirtualMicMode::Translate).unwrap();
+        assert_eq!(j, "\"translate\"");
         let back: VirtualMicMode = serde_json::from_str("\"pass_through\"").unwrap();
         assert_eq!(back, VirtualMicMode::PassThrough);
     }
@@ -210,7 +195,6 @@ mod tests {
     #[test]
     fn translate_requires_openai_others_do_not() {
         assert!(VirtualMicMode::Translate.requires_openai());
-        assert!(VirtualMicMode::TranslateWithOriginal.requires_openai());
         assert!(!VirtualMicMode::PassThrough.requires_openai());
         assert!(!VirtualMicMode::Silence.requires_openai());
     }
@@ -222,14 +206,6 @@ mod tests {
         assert_eq!(p, Phase::ConnectingTranslation);
         st.mark_openai_connected(true);
         assert_eq!(st.phase, Phase::Translating);
-    }
-
-    #[test]
-    fn transition_to_translate_with_original_when_connected() {
-        let mut st = AppState::new();
-        st.mark_openai_connected(true);
-        let p = st.transition(VirtualMicMode::TranslateWithOriginal);
-        assert_eq!(p, Phase::TranslatingWithOriginal);
     }
 
     #[test]

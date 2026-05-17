@@ -1,8 +1,8 @@
 /* Shared constants: modes, language lists, and UI<->backend mappings. */
 
-export type UiMode = "silence" | "pass" | "translate" | "mixed";
+export type UiMode = "silence" | "pass" | "translate";
 export type BackendMode =
-  | "silence" | "pass_through" | "translate" | "translate_with_original";
+  | "silence" | "pass_through" | "translate";
 
 export const MODES: { id: UiMode; label: string; color: string; short: string; body: string }[] = [
   {
@@ -24,14 +24,7 @@ export const MODES: { id: UiMode; label: string; color: string; short: string; b
     label: "Translate",
     color: "var(--c-translate)",
     short: "Translating",
-    body: "Only translated speech is sent.",
-  },
-  {
-    id: "mixed",
-    label: "Translate + Original",
-    color: "var(--c-mixed)",
-    short: "Translating with original underneath",
-    body: "Translated speech is sent with your original voice quietly underneath.",
+    body: "Translated speech is sent. Original voice volume is controlled in Translation.",
   },
 ];
 
@@ -79,7 +72,7 @@ export const SOURCE_LANGS: { code: string; name: string }[] = [
 /* Mode mappings: UI id <-> Rust VirtualMicMode (snake_case) */
 const M2B: Record<UiMode, BackendMode> = {
   silence: "silence", pass: "pass_through",
-  translate: "translate", mixed: "translate_with_original",
+  translate: "translate",
 };
 export const modeToBackend = (m: UiMode): BackendMode => M2B[m];
 export const modeFromBackend = (b: BackendMode): UiMode =>

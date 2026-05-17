@@ -49,7 +49,7 @@
         ariaLabel="Toggle transcript history"
         value={store.config?.privacy.save_transcript_history ?? false}
         onChange={(v) => store.setPrivacy({ save_transcript_history: v })}
-        tint="var(--c-mixed)"
+        tint="var(--c-accent)"
       />
     </span>
   </Row>

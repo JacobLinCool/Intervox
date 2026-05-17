@@ -19,7 +19,7 @@
         ariaLabel="Toggle floating captions"
         value={store.config?.captions.enabled ?? store.captionsOpen}
         onChange={(v) => store.setCaptions({ enabled: v })}
-        tint="var(--c-mixed)"
+        tint="var(--c-accent)"
       />
     </span>
   </Row>
@@ -46,7 +46,7 @@
         ariaLabel="Toggle original captions"
         value={store.config?.captions.show_source ?? false}
         onChange={(v) => store.setCaptions({ show_source: v })}
-        tint="var(--c-mixed)"
+        tint="var(--c-accent)"
       />
     </span>
   </Row>

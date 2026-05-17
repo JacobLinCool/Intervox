@@ -8,7 +8,6 @@
     off:       "#8a8a8e",
     pass:      "var(--c-pass)",
     translate: "var(--c-translate)",
-    mixed:     "var(--c-mixed)",
     error:     "var(--c-error)",
   };
 

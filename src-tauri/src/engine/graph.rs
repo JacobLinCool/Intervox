@@ -1,18 +1,19 @@
 //! Per-frame routing logic for the live audio engine.
 //!
 //! `route_frame` is the single per-frame decision point: it reads the current
-//! `VirtualMicMode` and dispatches the captured 48 kHz mono PCM frame
+//! `VirtualMicMode` plus the optional original-audio tap and dispatches the
+//! captured 48 kHz mono PCM frame
 //! appropriately:
 //!
 //! - `PassThrough`: write raw mic audio to the virtual mic ring and measure
 //!   output level.
-//! - `Translate` / `TranslateWithOriginal`: resample 48 kHz → 24 kHz, convert
-//!   to PCM16, repacketize into fixed 40 ms OpenAI uplink chunks, and `try_send`
-//!   into the uplink channel to the OpenAI transport. The raw mic frame is NEVER
-//!   written to the ring in these modes (no-leak guarantee).
-//! - `TranslateWithOriginal` additionally taps the 48 kHz mono frame into the
-//!   shared `original_queue` (bounded VecDeque) so the pull task can later mix
-//!   the delayed original under the translated audio (Task 4.3).
+//! - `Translate`: resample 48 kHz → 24 kHz, convert to PCM16, repacketize into
+//!   fixed 40 ms OpenAI uplink chunks, and `try_send` into the uplink channel
+//!   to the OpenAI transport. The raw mic frame is NEVER written to the ring in
+//!   this mode (no-leak guarantee).
+//! - `Translate` with original voice percent > 0 additionally taps the 48 kHz
+//!   mono frame into the shared `original_queue` (bounded VecDeque) so the pull
+//!   task can later mix the delayed original under the translated audio.
 //! - `Silence` (unexpected while capture is running): drop frame.
 //!
 //! Keeping this function pure-ish (no I/O beyond the ring write) lets it be
@@ -28,10 +29,10 @@
 //!
 //! # Original-audio tap (Task 4.3)
 //!
-//! In `TranslateWithOriginal` mode, the graph loop also pushes the 48 kHz mono
-//! frame into an `Option<SharedOriginalQueue>`.  The queue is `None` when the
-//! mode is `Translate` (no original), `Some(queue)` when the mode is
-//! `TranslateWithOriginal`.  The pull task drains 480 samples per tick.
+//! In `Translate` mode, the graph loop also pushes the 48 kHz mono frame into
+//! an `Option<SharedOriginalQueue>` when original voice percent is positive.
+//! The queue is `None` at 0%, and `Some(queue)` when original voice should be
+//! mixed underneath the translation. The pull task drains 480 samples per tick.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -108,7 +109,7 @@ pub(super) struct RouteFrameContext<'a> {
     pub resampler: &'a mut LinearResampler,
     /// Persistent 24 kHz PCM16 chunker that emits fixed 40 ms OpenAI packets.
     pub uplink_chunker: &'a mut OpenAiChunker,
-    /// Optional 48 kHz original-audio tap for TranslateWithOriginal.
+    /// Optional 48 kHz original-audio tap for Translate with original voice.
     pub original_queue: Option<&'a SharedOriginalQueue>,
 }
 
@@ -121,7 +122,8 @@ pub(super) fn route_frame(
     frame: &[f32],
     ctx: RouteFrameContext<'_>,
 ) -> bool {
-    let routing = FrameRouting::for_mode(mode);
+    let original_voice_percent = u32::from(ctx.original_queue.is_some());
+    let routing = FrameRouting::for_mode_and_mix(mode, original_voice_percent);
 
     if routing.mic_to_ring {
         ctx.uplink_chunker.clear();
@@ -133,7 +135,7 @@ pub(super) fn route_frame(
         ctx.out_level.store(level.rms.to_bits(), Ordering::Relaxed);
         false
     } else if routing.mic_to_openai {
-        // Translate / TranslateWithOriginal: do NOT leak raw mic to ring.
+        // Translate: do NOT leak raw mic to ring.
         //
         // 1. Resample 48 kHz → 24 kHz (streaming; resampler carries phase
         //    across frames so there are no discontinuities at chunk boundaries).
@@ -161,11 +163,10 @@ pub(super) fn route_frame(
             }
         });
 
-        // Task 4.3: when in TranslateWithOriginal (mix_original == true),
-        // also push the SAME 48 kHz mono frame into the original-audio tap
-        // queue so the pull task can delay and mix it.
-        // This is ONLY done when the queue is provided (mix_original path).
-        // Translate mode passes None so the push is skipped entirely.
+        // When original voice percent is positive, also push the SAME 48 kHz
+        // mono frame into the original-audio tap queue so the pull task can
+        // delay and mix it. At 0%, the queue is None and no original samples
+        // are retained.
         if routing.mix_original {
             if let Some(q) = ctx.original_queue {
                 push_original_samples(q, frame);
@@ -256,7 +257,8 @@ mod tests {
         use intervox_core::audio::level_meter::LevelMeter;
         use intervox_core::FrameRouting;
 
-        let routing = FrameRouting::for_mode(mode);
+        let original_voice_percent = u32::from(original_queue.is_some());
+        let routing = FrameRouting::for_mode_and_mix(mode, original_voice_percent);
 
         if routing.mic_to_ring {
             uplink_chunker.clear();
@@ -383,30 +385,31 @@ mod tests {
     }
 
     #[test]
-    fn translate_with_original_does_not_write_to_ring_and_clears_out_level() {
+    fn translate_original_voice_queue_does_not_write_to_ring_and_clears_out_level() {
         let ring = TestRingProducer::new();
         let out_level = AtomicU32::new(u32::MAX);
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
         let mut chunker = super::OpenAiChunker::new();
+        let queue = translate_chain::new_original_queue();
 
         route_frame_test(
-            VirtualMicMode::TranslateWithOriginal,
+            VirtualMicMode::Translate,
             &frame,
             &ring,
             &out_level,
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
-            None,
+            Some(&queue),
         );
 
         assert!(
             !ring.was_written(),
-            "TranslateWithOriginal must NOT write raw mic to ring"
+            "Translate with original queue must NOT write raw mic to ring"
         );
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
-        assert_eq!(rms, 0.0, "TranslateWithOriginal must clear out_level to 0");
+        assert_eq!(rms, 0.0, "Translate with original queue must clear out_level to 0");
     }
 
     #[test]
@@ -558,7 +561,7 @@ mod tests {
     // ── Task 4.3: original-queue tap tests in graph context ───────────────────
 
     #[test]
-    fn translate_with_original_pushes_to_original_queue() {
+    fn translate_with_positive_original_percent_pushes_to_original_queue() {
         let ring = TestRingProducer::new();
         let out_level = AtomicU32::new(0);
         let frame: Vec<f32> = vec![0.5f32; translate_chain::PULL_FRAMES];
@@ -569,7 +572,7 @@ mod tests {
         let uplink: TestUplinkSlot = Arc::new(parking_lot::Mutex::new(Some(tx)));
 
         route_frame_test(
-            VirtualMicMode::TranslateWithOriginal,
+            VirtualMicMode::Translate,
             &frame,
             &ring,
             &out_level,
@@ -582,22 +585,21 @@ mod tests {
         let q_len = queue.lock().len();
         assert!(
             q_len > 0,
-            "TranslateWithOriginal must push frames to original_queue; got len={q_len}"
+            "Translate with original voice must push frames to original_queue; got len={q_len}"
         );
         assert!(
             !ring.was_written(),
-            "TranslateWithOriginal must NOT write raw mic to ring"
+            "Translate with original voice must NOT write raw mic to ring"
         );
     }
 
     #[test]
-    fn translate_mode_does_not_push_to_original_queue() {
+    fn translate_zero_original_percent_does_not_push_to_original_queue() {
         let ring = TestRingProducer::new();
         let out_level = AtomicU32::new(0);
         let frame: Vec<f32> = vec![0.5f32; translate_chain::PULL_FRAMES];
         let mut resampler = LinearResampler::new(48_000, 24_000);
         let mut chunker = super::OpenAiChunker::new();
-        // Even if a queue is passed, Translate mode must not push to it.
         let queue = translate_chain::new_original_queue();
 
         route_frame_test(
@@ -608,13 +610,13 @@ mod tests {
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
-            Some(&queue),
+            None,
         );
 
         let q_len = queue.lock().len();
         assert_eq!(
             q_len, 0,
-            "Translate mode must NOT push to original_queue (mix_original=false); got len={q_len}"
+            "Translate at 0% original voice must NOT push to original_queue; got len={q_len}"
         );
     }
 }

@@ -26,7 +26,7 @@ pub struct RouteDecision {
     pub captions_active: bool,
 }
 
-pub fn route(mode: VirtualMicMode) -> RouteDecision {
+pub fn route(mode: VirtualMicMode, original_voice_percent: u32) -> RouteDecision {
     match mode {
         VirtualMicMode::Silence => RouteDecision {
             capture_mic: false,
@@ -54,17 +54,7 @@ pub fn route(mode: VirtualMicMode) -> RouteDecision {
             mic_to_openai: true,
             mic_to_vmic: false,
             translated_to_vmic: true,
-            mix_original: false,
-            vmic_silence: false,
-            captions_active: true,
-        },
-        VirtualMicMode::TranslateWithOriginal => RouteDecision {
-            capture_mic: true,
-            openai_connected: true,
-            mic_to_openai: true,
-            mic_to_vmic: false,
-            translated_to_vmic: true,
-            mix_original: true,
+            mix_original: original_voice_percent > 0,
             vmic_silence: false,
             captions_active: true,
         },
@@ -77,7 +67,7 @@ mod tests {
 
     #[test]
     fn silence_sends_no_audio_no_openai_rule_19_7() {
-        let r = route(VirtualMicMode::Silence);
+        let r = route(VirtualMicMode::Silence, 15);
         assert!(r.vmic_silence);
         assert!(!r.openai_connected);
         assert!(!r.mic_to_vmic && !r.translated_to_vmic);
@@ -86,14 +76,14 @@ mod tests {
 
     #[test]
     fn passthrough_no_openai_cost_rule_19_8() {
-        let r = route(VirtualMicMode::PassThrough);
+        let r = route(VirtualMicMode::PassThrough, 15);
         assert!(r.mic_to_vmic);
         assert!(!r.openai_connected && !r.mic_to_openai);
     }
 
     #[test]
-    fn translate_does_not_leak_original_rule_19_9() {
-        let r = route(VirtualMicMode::Translate);
+    fn translate_zero_original_does_not_leak_original_rule_19_9() {
+        let r = route(VirtualMicMode::Translate, 0);
         assert!(r.mic_to_openai && r.translated_to_vmic);
         assert!(!r.mic_to_vmic, "raw mic must NOT reach vmic in Translate");
         assert!(!r.mix_original);
@@ -101,22 +91,18 @@ mod tests {
     }
 
     #[test]
-    fn translate_with_original_mixes() {
-        let r = route(VirtualMicMode::TranslateWithOriginal);
+    fn translate_positive_original_percent_mixes() {
+        let r = route(VirtualMicMode::Translate, 15);
         assert!(r.translated_to_vmic && r.mix_original);
         assert!(r.openai_connected);
     }
 
     #[test]
-    fn only_translate_modes_use_openai() {
+    fn only_translate_uses_openai() {
         for m in [VirtualMicMode::Silence, VirtualMicMode::PassThrough] {
-            assert!(!route(m).openai_connected);
+            assert!(!route(m, 15).openai_connected);
         }
-        for m in [
-            VirtualMicMode::Translate,
-            VirtualMicMode::TranslateWithOriginal,
-        ] {
-            assert!(route(m).openai_connected);
-        }
+        assert!(route(VirtualMicMode::Translate, 0).openai_connected);
+        assert!(route(VirtualMicMode::Translate, 15).openai_connected);
     }
 }

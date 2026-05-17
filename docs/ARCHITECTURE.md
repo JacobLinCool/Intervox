@@ -74,10 +74,10 @@ The engine uses the mode routing rules from `intervox-core`:
 |---|---:|---:|---|
 | Silence | no | no | silence |
 | Pass-through | yes | no | original mic audio |
-| Translate | yes | yes | translated audio only |
-| Translate + Original | yes | yes | translated audio plus delayed quiet original |
+| Translate, original voice 0% | yes | yes | translated audio only |
+| Translate, original voice >0% | yes | yes | translated audio plus delayed quiet original |
 
-Translate mode must not leak original microphone audio to the virtual mic.
+Translate at 0% original voice must not leak original microphone audio to the virtual mic.
 Silence and Pass-through must not keep an OpenAI session open.
 
 ## HAL Driver Contract

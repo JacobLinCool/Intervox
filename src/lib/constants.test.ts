@@ -7,12 +7,12 @@ import type { LangCtx } from "./constants";
 describe("mode mapping", () => {
   it("maps ui id <-> backend VirtualMicMode", () => {
     expect(modeToBackend("pass")).toBe("pass_through");
-    expect(modeToBackend("mixed")).toBe("translate_with_original");
-    expect(modeFromBackend("translate_with_original")).toBe("mixed");
+    expect(modeToBackend("translate")).toBe("translate");
+    expect(modeFromBackend("translate")).toBe("translate");
     expect(modeFromBackend("silence")).toBe("silence");
   });
-  it("MODES has the four ids", () => {
-    expect(MODES.map((m) => m.id)).toEqual(["silence","pass","translate","mixed"]);
+  it("MODES has the three ids", () => {
+    expect(MODES.map((m) => m.id)).toEqual(["silence","pass","translate"]);
   });
 });
 describe("latency/quality mapping", () => {

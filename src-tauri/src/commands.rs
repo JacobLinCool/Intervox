@@ -127,23 +127,21 @@ where
 // ── Tray helpers (pure, no Tauri runtime) ────────────────────────────────────
 
 /// Short label shown in the tray title / tooltip for each mode.
-/// Order: [Silence, PassThrough, Translate, TranslateWithOriginal].
+/// Order: [Silence, PassThrough, Translate].
 pub fn tray_mode_label(mode: VirtualMicMode) -> &'static str {
     match mode {
         VirtualMicMode::Silence => "Silence",
         VirtualMicMode::PassThrough => "Pass-Through",
         VirtualMicMode::Translate => "Translate",
-        VirtualMicMode::TranslateWithOriginal => "Translate+Orig",
     }
 }
 
-/// Returns `[silence_checked, passthrough_checked, translate_checked, translate_orig_checked]`.
-pub fn tray_menu_checks(current: VirtualMicMode) -> [bool; 4] {
+/// Returns `[silence_checked, passthrough_checked, translate_checked]`.
+pub fn tray_menu_checks(current: VirtualMicMode) -> [bool; 3] {
     [
         current == VirtualMicMode::Silence,
         current == VirtualMicMode::PassThrough,
         current == VirtualMicMode::Translate,
-        current == VirtualMicMode::TranslateWithOriginal,
     ]
 }
 
@@ -196,14 +194,13 @@ pub fn apply_mode(
         let _ = tray_state.mode_silence.set_checked(checks[0]);
         let _ = tray_state.mode_passthrough.set_checked(checks[1]);
         let _ = tray_state.mode_translate.set_checked(checks[2]);
-        let _ = tray_state.mode_translate_orig.set_checked(checks[3]);
     }
     Ok(())
 }
 
 // ── Tray managed state ─────────────────────────────────────────────────────────
 
-/// Holds the `TrayIcon` handle plus the 4 `CheckMenuItem` handles so that
+/// Holds the `TrayIcon` handle plus the 3 `CheckMenuItem` handles so that
 /// `apply_mode` can update their checked-state and the tray title without
 /// rebuilding the whole menu. `TrayIcon<Wry>` is `Send + Sync` (Tauri marks
 /// it so); `CheckMenuItem<Wry>` likewise. Stored as Tauri managed state.
@@ -212,7 +209,6 @@ pub struct TrayState {
     pub mode_silence: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub mode_passthrough: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub mode_translate: tauri::menu::CheckMenuItem<tauri::Wry>,
-    pub mode_translate_orig: tauri::menu::CheckMenuItem<tauri::Wry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,11 +337,13 @@ pub fn set_mix_settings(
     settings: MixSettings,
     app: tauri::AppHandle,
     h: tauri::State<AppHandle>,
+    engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
     update_config(&h, |cfg| {
         cfg.mix.duck_original = settings.duck_original;
         cfg.audio.limiter_enabled = settings.limiter_enabled;
     })?;
+    engine.restart_translation_session_for_config();
     {
         use tauri::Emitter;
         let _ = app.emit("status-changed", h.state.lock().unwrap().status.clone());
@@ -685,14 +683,13 @@ mod tests {
     // ── tray_mode_label ───────────────────────────────────────────────────────
 
     #[test]
-    fn tray_mode_label_all_four_distinct() {
+    fn tray_mode_label_all_three_distinct() {
         let labels = [
             tray_mode_label(VirtualMicMode::Silence),
             tray_mode_label(VirtualMicMode::PassThrough),
             tray_mode_label(VirtualMicMode::Translate),
-            tray_mode_label(VirtualMicMode::TranslateWithOriginal),
         ];
-        // All four labels must be non-empty and distinct.
+        // All three labels must be non-empty and distinct.
         for l in &labels {
             assert!(!l.is_empty(), "label must not be empty");
         }
@@ -708,10 +705,6 @@ mod tests {
         assert_eq!(tray_mode_label(VirtualMicMode::Silence), "Silence");
         assert_eq!(tray_mode_label(VirtualMicMode::PassThrough), "Pass-Through");
         assert_eq!(tray_mode_label(VirtualMicMode::Translate), "Translate");
-        assert_eq!(
-            tray_mode_label(VirtualMicMode::TranslateWithOriginal),
-            "Translate+Orig"
-        );
     }
 
     // ── tray_menu_checks ──────────────────────────────────────────────────────
@@ -722,7 +715,6 @@ mod tests {
             VirtualMicMode::Silence,
             VirtualMicMode::PassThrough,
             VirtualMicMode::Translate,
-            VirtualMicMode::TranslateWithOriginal,
         ];
         for mode in modes {
             let checks = tray_menu_checks(mode);
@@ -737,22 +729,18 @@ mod tests {
 
     #[test]
     fn tray_menu_checks_correct_index() {
-        // Order: [Silence=0, PassThrough=1, Translate=2, TranslateWithOriginal=3]
+        // Order: [Silence=0, PassThrough=1, Translate=2]
         assert_eq!(
             tray_menu_checks(VirtualMicMode::Silence),
-            [true, false, false, false]
+            [true, false, false]
         );
         assert_eq!(
             tray_menu_checks(VirtualMicMode::PassThrough),
-            [false, true, false, false]
+            [false, true, false]
         );
         assert_eq!(
             tray_menu_checks(VirtualMicMode::Translate),
-            [false, false, true, false]
-        );
-        assert_eq!(
-            tray_menu_checks(VirtualMicMode::TranslateWithOriginal),
-            [false, false, false, true]
+            [false, false, true]
         );
     }
 
@@ -847,11 +835,21 @@ pub fn set_quality_mode(quality: String, h: tauri::State<AppHandle>) -> Result<(
 }
 
 #[tauri::command]
-pub fn set_mix_percent(percent: u32, h: tauri::State<AppHandle>) -> Result<(), AppError> {
+pub fn set_mix_percent(
+    percent: u32,
+    app: tauri::AppHandle,
+    h: tauri::State<AppHandle>,
+    engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
+) -> Result<(), AppError> {
     let clamped = percent.min(30);
     update_config(&h, |cfg| {
         cfg.mix.original_voice_percent = clamped;
     })?;
+    engine.restart_translation_session_for_config();
+    {
+        use tauri::Emitter;
+        let _ = app.emit("status-changed", h.state.lock().unwrap().status.clone());
+    }
     Ok(())
 }
 

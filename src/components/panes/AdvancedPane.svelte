@@ -20,7 +20,7 @@
         ariaLabel="Toggle latency badge"
         value={store.config?.ui.show_latency_badge ?? false}
         onChange={(v) => store.setUiConfig({ show_latency_badge: v })}
-        tint="var(--c-mixed)"
+        tint="var(--c-accent)"
       />
     </span>
   </Row>
@@ -49,7 +49,7 @@
         ariaLabel="Toggle launch at login"
         value={store.config?.ui.launch_at_login ?? false}
         onChange={(v) => store.setUiConfig({ launch_at_login: v })}
-        tint="var(--c-mixed)"
+        tint="var(--c-accent)"
       />
     </span>
   </Row>
@@ -60,7 +60,7 @@
         ariaLabel="Toggle Dock icon visibility"
         value={store.config?.ui.hide_dock_icon ?? false}
         onChange={(v) => store.setUiConfig({ hide_dock_icon: v })}
-        tint="var(--c-mixed)"
+        tint="var(--c-accent)"
       />
     </span>
   </Row>
