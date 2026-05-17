@@ -35,6 +35,8 @@ use intervox_core::AppError;
 use serde::Serialize;
 use tauri::Emitter;
 
+use super::AudioBackpressureCounters;
+
 /// Target sample rate for the engine (virtual mic + OpenAI path).
 const TARGET_HZ: u32 = 48_000;
 
@@ -231,6 +233,7 @@ fn build_stream<T>(
     pool_rx: Receiver<Vec<f32>>,
     level: Arc<AtomicU32>,
     stream_error: Arc<AtomicBool>,
+    backpressure: Arc<AudioBackpressureCounters>,
 ) -> Result<cpal::Stream, AppError>
 where
     T: SizedSample + Send + Copy + 'static,
@@ -246,16 +249,28 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
+                let input_frames = data.len() / usize::from(channels);
+                if input_frames == 0 {
+                    return;
+                }
+                if input_frames > MAX_CALLBACK_FRAMES {
+                    backpressure.capture_capacity_drop();
+                    return;
+                }
+
                 downmix_converted_to_mono_into(data, channels, &mut mono);
                 if mono.is_empty() || mono.len() > MAX_CALLBACK_FRAMES {
+                    backpressure.capture_capacity_drop();
                     return;
                 }
 
                 let Ok(mut resampled) = pool_rx.try_recv() else {
+                    backpressure.capture_pool_miss();
                     return;
                 };
                 if !resampler_has_capacity(&resampler, mono.len(), &resampled) {
                     let _ = pool_tx.try_send(resampled);
+                    backpressure.capture_capacity_drop();
                     return;
                 }
                 resampler.process_into(&mono, &mut resampled);
@@ -267,6 +282,7 @@ where
                     .try_send(CapturedFrame::new(resampled, pool_tx.clone()))
                     .is_err()
                 {
+                    backpressure.capture_sink_drop();
                     // The frame is dropped here; CapturedFrame::drop returns
                     // the buffer to the pool immediately.
                 }
@@ -374,6 +390,7 @@ pub fn start(
     device_id: Option<&str>,
     level: Arc<AtomicU32>,
     app: tauri::AppHandle,
+    backpressure: Arc<AudioBackpressureCounters>,
 ) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<CapturedFrame>), AppError> {
     let device = resolve_input_device(device_id)?;
 
@@ -404,6 +421,7 @@ pub fn start(
             let mut pool_tx_slot = Some(pool_tx);
             let mut pool_rx_slot = Some(pool_rx);
             let mut level_slot = Some(level);
+            let mut backpressure_slot = Some(backpressure);
 
             macro_rules! build_for_format {
                 ($sample:ty) => {
@@ -415,6 +433,9 @@ pub fn start(
                         pool_rx_slot.take().expect("capture pool receiver taken once"),
                         level_slot.take().expect("capture level taken once"),
                         Arc::clone(&stream_error),
+                        backpressure_slot
+                            .take()
+                            .expect("capture backpressure counters taken once"),
                     )
                 };
             }

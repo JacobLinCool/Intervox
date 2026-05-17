@@ -5,6 +5,12 @@
   import ConnectionLogModal from "../ConnectionLogModal.svelte";
 
   let showLog = $state(false);
+
+  const captureDrops = $derived(
+    store.backpressure.capturePoolMisses
+      + store.backpressure.captureCapacityDrops
+      + store.backpressure.captureSinkDrops,
+  );
 </script>
 
 <PaneTitle
@@ -29,6 +35,12 @@
     <span style={css({ marginLeft: "auto" })}>
       <button class="btn" onclick={() => (showLog = true)}>View log</button>
     </span>
+  </Row>
+  <Row>
+    <RowLabel
+      title="Audio backpressure"
+      sub={`Capture ${captureDrops} · queue ${store.backpressure.uplinkQueueDrops} · no session ${store.backpressure.uplinkNoSessionDrops}`}
+    />
   </Row>
   <Row last>
     <RowLabel

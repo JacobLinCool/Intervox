@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import type { BackendMode, Quality } from "./constants";
+import type { BackendMode } from "./constants";
 
 export type Health = "ready" | "warning" | "error";
 export type TranslationConn =
@@ -16,6 +16,14 @@ export interface AppStatus {
 export interface DeviceInfo { id: string; name: string }
 export interface AudioDevices { inputs: DeviceInfo[]; outputs: DeviceInfo[] }
 export interface AudioLevels { inputLevel: number; outputLevel: number }
+export interface AudioBackpressureMetrics {
+  capturePoolMisses: number;
+  captureCapacityDrops: number;
+  captureSinkDrops: number;
+  uplinkNoSessionDrops: number;
+  uplinkQueueDrops: number;
+  uplinkChunksSent: number;
+}
 export interface RecoveryAction { label: string; command: string }
 export interface AppError {
   code: string; title: string; message: string;
@@ -39,7 +47,7 @@ export interface Config {
   version: number;
   audio: { source_mic_id: string | null; monitor_output_id: string | null;
            virtual_mic_mode: string; input_gain_db: number; limiter_enabled: boolean };
-  translation: { target_language: string; quality_mode: Quality };
+  translation: { target_language: string };
   mix: { original_voice_percent: number; translated_voice_percent: number; duck_original: boolean };
   captions: { enabled: boolean; show_source: boolean; show_target: boolean;
               font_size: string; always_on_top: boolean };
@@ -58,13 +66,14 @@ export const cmd = {
   getAppStatus: () => invoke<AppStatus>("get_app_status"),
   getAudioDevices: () => invoke<AudioDevices>("get_audio_devices"),
   getAudioLevels: () => invoke<AudioLevels>("get_audio_levels"),
+  getAudioBackpressureMetrics: () =>
+    invoke<AudioBackpressureMetrics>("get_audio_backpressure_metrics"),
   getConfig: () => invoke<Config>("get_config"),
   getAccountStatus: () => invoke<AccountStatus>("get_account_status"),
   setMode: (mode: BackendMode) => invoke("set_virtual_mic_mode", { mode }),
   setSourceMic: (deviceId: string) => invoke("set_source_mic", { deviceId }),
   setMonitorOutput: (deviceId: string | null) => invoke("set_monitor_output", { deviceId }),
   setTargetLanguage: (language: string) => invoke("set_target_language", { language }),
-  setQualityMode: (quality: string) => invoke("set_quality_mode", { quality }),
   setMixPercent: (percent: number) => invoke("set_mix_percent", { percent }),
   setCaptionsConfig: (c: Config["captions"]) => invoke("set_captions_config", { c }),
   setPrivacyConfig: (p: Config["privacy"]) => invoke("set_privacy_config", { p }),
@@ -100,6 +109,8 @@ export const on = {
   status: (f: (s: AppStatus) => void) => listen<AppStatus>("status-changed", (e) => f(e.payload)),
   inputLevel: (f: (v: number) => void) => listen<number>("input-level", (e) => f(e.payload)),
   outputLevel: (f: (v: number) => void) => listen<number>("output-level", (e) => f(e.payload)),
+  backpressure: (f: (m: AudioBackpressureMetrics) => void) =>
+    listen<AudioBackpressureMetrics>("audio-backpressure", (e) => f(e.payload)),
   latency: (f: (v: number) => void) => listen<number>("latency-changed", (e) => f(e.payload)),
   srcDelta: (f: (t: string) => void) =>
     listen<{ text: string }>("source-transcript-delta", (e) => f(e.payload.text)),

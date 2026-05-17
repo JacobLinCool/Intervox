@@ -78,16 +78,6 @@ export const modeToBackend = (m: UiMode): BackendMode => M2B[m];
 export const modeFromBackend = (b: BackendMode): UiMode =>
   (Object.keys(M2B) as UiMode[]).find((k) => M2B[k] === b) ?? "translate";
 
-/* Latency/quality mappings: UI label <-> backend quality_mode string */
-export type UiLatency = "fastest" | "balanced" | "smooth";
-export type Quality = "low_latency" | "balanced" | "accuracy";
-const L2Q: Record<UiLatency, Quality> = {
-  fastest: "low_latency", balanced: "balanced", smooth: "accuracy",
-};
-export const latencyToQuality = (l: UiLatency): Quality => L2Q[l];
-export const qualityToLatency = (q: Quality): UiLatency =>
-  (Object.keys(L2Q) as UiLatency[]).find((k) => L2Q[k] === q) ?? "balanced";
-
 /* Language display helpers (pure functions; no React dependency). */
 export interface LangCtx {
   sourceLangCode: string; sourceDetected: boolean;

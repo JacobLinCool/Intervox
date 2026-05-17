@@ -51,14 +51,12 @@ pub struct TranslationConfig {
     // translation endpoint auto-detects the source language and does not accept
     // it as a parameter, so exposing it would only mislead users.
     pub target_language: String,
-    pub quality_mode: String,
 }
 
 impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
             target_language: "en".into(),
-            quality_mode: "balanced".into(),
         }
     }
 }
@@ -250,7 +248,6 @@ mod tests {
         assert_eq!(c.audio.virtual_mic_mode, "silence");
         assert!(c.audio.limiter_enabled);
         assert_eq!(c.translation.target_language, "en");
-        assert_eq!(c.translation.quality_mode, "balanced");
         assert_eq!(c.mix.original_voice_percent, 0);
         assert_eq!(c.mix.translated_voice_percent, 100);
         assert!(c.mix.duck_original);

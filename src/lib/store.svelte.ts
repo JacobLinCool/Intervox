@@ -1,15 +1,34 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { cmd, on } from "./tauri";
-import type { AppStatus, AudioDevices, Config, AccountStatus, AppError, MicPermission, DriverState } from "./tauri";
+import type {
+  AccountStatus,
+  AppError,
+  AppStatus,
+  AudioBackpressureMetrics,
+  AudioDevices,
+  Config,
+  DriverState,
+  MicPermission,
+} from "./tauri";
 import {
   modeFromBackend, modeToBackend,
-  qualityToLatency, latencyToQuality,
   ALL_LANGS, SOURCE_LANGS,
   isSameLang, langPair,
 } from "./constants";
-import type { UiMode, UiLatency, Quality, LangCtx } from "./constants";
+import type { UiMode, LangCtx } from "./constants";
 
 const AUDIO_INPUT_DETECTED_RMS = 0.0001;
+
+function zeroBackpressureMetrics(): AudioBackpressureMetrics {
+  return {
+    capturePoolMisses: 0,
+    captureCapacityDrops: 0,
+    captureSinkDrops: 0,
+    uplinkNoSessionDrops: 0,
+    uplinkQueueDrops: 0,
+    uplinkChunksSent: 0,
+  };
+}
 
 // ────────────────────────────────────────────────────────────
 // Pure helpers (exported so tests can import them directly)
@@ -83,6 +102,7 @@ class Store {
   tgtText: string = $state("");
   inputLevel: number = $state(0);
   outputLevel: number = $state(0);
+  backpressure: AudioBackpressureMetrics = $state(zeroBackpressureMetrics());
   audioInputDetected: boolean = $state(false);
   lastError: AppError | null = $state(null);
   sourceDetected: boolean = $state(false);
@@ -107,8 +127,9 @@ class Store {
   private toastSeq = 0;
 
   private unlisten: UnlistenFn[] = [];
-  private meterTimer: ReturnType<typeof setInterval> | null = null;
+  private removeMeterResyncListeners: (() => void) | null = null;
   private meterSyncBusy = false;
+  private backpressureSyncBusy = false;
 
   // ── Lifecycle ──────────────────────────────────────────────
 
@@ -126,6 +147,7 @@ class Store {
       this.account = account;
       this.micPermission = micPermission;
       this.driverState = driverState;
+      this.applyLevels(status.inputLevel, status.outputLevel);
 
       this.captionsOpen = config.captions.enabled;
       this.onboardingOpen = !config.onboarding_completed;
@@ -140,7 +162,9 @@ class Store {
     try { this.appVersion = await cmd.appVersion(); } catch {}
 
     void this.refreshDevices();
-    this.startMeterSync();
+    void this.syncMeterLevels();
+    void this.syncBackpressureMetrics();
+    this.installMeterResyncListeners();
 
     // Subscribe to events — push unlisten fns
     this.unlisten.push(await on.status((s) => {
@@ -153,6 +177,9 @@ class Store {
     }));
     this.unlisten.push(await on.outputLevel((v) => {
       this.applyLevels(this.inputLevel, v);
+    }));
+    this.unlisten.push(await on.backpressure((m) => {
+      this.backpressure = m;
     }));
     this.unlisten.push(await on.latency((v) => {
       if (this.status) this.status = { ...this.status, latencyMs: v };
@@ -179,10 +206,8 @@ class Store {
   dispose(): void {
     for (const fn of this.unlisten) fn();
     this.unlisten = [];
-    if (this.meterTimer) {
-      clearInterval(this.meterTimer);
-      this.meterTimer = null;
-    }
+    this.removeMeterResyncListeners?.();
+    this.removeMeterResyncListeners = null;
   }
 
   // ── Derived getters ────────────────────────────────────────
@@ -251,10 +276,6 @@ class Store {
     return this.config?.mix.original_voice_percent ?? 0;
   }
 
-  get latencyPref(): UiLatency {
-    return qualityToLatency(this.config?.translation.quality_mode ?? "balanced");
-  }
-
   // ── Actions ────────────────────────────────────────────────
 
   pushToast(kind: "success" | "error", text: string): void {
@@ -283,22 +304,49 @@ class Store {
     if (inputLevel >= AUDIO_INPUT_DETECTED_RMS) this.audioInputDetected = true;
   }
 
-  private startMeterSync(): void {
-    if (this.meterTimer) return;
-    const sync = async () => {
-      if (this.meterSyncBusy) return;
-      this.meterSyncBusy = true;
-      try {
-        const levels = await cmd.getAudioLevels();
-        this.applyLevels(levels.inputLevel, levels.outputLevel);
-      } catch {
-        // Event listeners still carry errors; meter sync is read-only.
-      } finally {
-        this.meterSyncBusy = false;
-      }
+  private async syncMeterLevels(): Promise<void> {
+    if (this.meterSyncBusy) return;
+    this.meterSyncBusy = true;
+    try {
+      const levels = await cmd.getAudioLevels();
+      this.applyLevels(levels.inputLevel, levels.outputLevel);
+    } catch {
+      // Event listeners carry realtime updates; this is only a foreground snapshot.
+    } finally {
+      this.meterSyncBusy = false;
+    }
+  }
+
+  private async syncBackpressureMetrics(): Promise<void> {
+    if (this.backpressureSyncBusy) return;
+    this.backpressureSyncBusy = true;
+    try {
+      this.backpressure = await cmd.getAudioBackpressureMetrics();
+    } catch {
+      // Diagnostics snapshot only; live capture continues without it.
+    } finally {
+      this.backpressureSyncBusy = false;
+    }
+  }
+
+  private installMeterResyncListeners(): void {
+    if (this.removeMeterResyncListeners) return;
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    const sync = () => {
+      void this.syncMeterLevels();
+      void this.syncBackpressureMetrics();
     };
-    void sync();
-    this.meterTimer = setInterval(sync, 125);
+    const syncWhenVisible = () => {
+      if (document.visibilityState === "visible") sync();
+    };
+
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", syncWhenVisible);
+    this.removeMeterResyncListeners = () => {
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", syncWhenVisible);
+    };
   }
 
   async setMode(m: UiMode): Promise<void> {
@@ -318,17 +366,20 @@ class Store {
   }
 
   async setSourceMic(id: string): Promise<void> {
-    const ok = await this.tryCmd(() => cmd.setSourceMic(id));
-    if (!ok) return;
+    const previousId = this.config?.audio.source_mic_id ?? null;
+    const previousName = this.status?.sourceMicName ?? null;
+    const nextName =
+      this.devices.inputs.find((d) => d.id === id)?.name ?? id.replace(/^coreaudio:/, "");
     if (this.config) this.config.audio.source_mic_id = id;
-    await this.refreshStatus();
-  }
+    if (this.status) this.status = { ...this.status, sourceMicName: nextName };
 
-  async setLatencyPref(v: UiLatency): Promise<void> {
-    const quality = latencyToQuality(v);
-    const ok = await this.tryCmd(() => cmd.setQualityMode(quality));
-    if (!ok) return;
-    if (this.config) this.config.translation.quality_mode = quality;
+    const ok = await this.tryCmd(() => cmd.setSourceMic(id));
+    if (!ok) {
+      if (this.config) this.config.audio.source_mic_id = previousId;
+      if (this.status) this.status = { ...this.status, sourceMicName: previousName };
+      return;
+    }
+    await this.refreshStatus();
   }
 
   async setMixPercent(n: number): Promise<void> {

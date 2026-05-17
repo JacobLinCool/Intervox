@@ -192,9 +192,7 @@ fn execute_shortcut_action(app: &tauri::AppHandle, action: ShortcutAction) {
             }
         }
         ShortcutAction::Silence => {
-            if let Err(e) =
-                crate::commands::apply_mode(app, &h, &engine, VirtualMicMode::Silence)
-            {
+            if let Err(e) = crate::commands::apply_mode(app, &h, &engine, VirtualMicMode::Silence) {
                 use tauri::Emitter as _;
                 let _ = app.emit("error", e);
             }

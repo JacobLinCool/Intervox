@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
   import { ALL_LANGS, COMMON_LANGS } from "$lib/constants";
-  import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown, Segmented, Slider } from "$lib/controls";
+  import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown, Slider } from "$lib/controls";
   import { LangChip, Check, SysIcon } from "$lib/icons";
   import { css } from "$lib/util";
 
@@ -161,21 +161,6 @@
 </FieldGroup>
 
 <FieldGroup title="Performance">
-  <Row>
-    <RowLabel
-      title="Latency"
-      sub="How aggressively to deliver translated audio. Doesn't change accuracy."
-    />
-    <Segmented
-      value={store.latencyPref}
-      options={[
-        { value: "fastest", label: "Fastest" },
-        { value: "balanced", label: "Balanced" },
-        { value: "smooth", label: "Smoother audio" },
-      ]}
-      onChange={(v) => store.setLatencyPref(v)}
-    />
-  </Row>
   <Row last>
     <RowLabel
       title="Original voice volume"

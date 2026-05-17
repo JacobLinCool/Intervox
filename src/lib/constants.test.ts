@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { MODES, modeToBackend, modeFromBackend, latencyToQuality,
-         qualityToLatency, TARGET_LANGS, SOURCE_LANGS,
+import { MODES, modeToBackend, modeFromBackend,
+         TARGET_LANGS, SOURCE_LANGS,
          detectedSourceName, langPair, isSameLang } from "./constants";
 import type { LangCtx } from "./constants";
 
@@ -13,14 +13,6 @@ describe("mode mapping", () => {
   });
   it("MODES has the three ids", () => {
     expect(MODES.map((m) => m.id)).toEqual(["silence","pass","translate"]);
-  });
-});
-describe("latency/quality mapping", () => {
-  it("maps both directions", () => {
-    expect(latencyToQuality("fastest")).toBe("low_latency");
-    expect(latencyToQuality("smooth")).toBe("accuracy");
-    expect(qualityToLatency("accuracy")).toBe("smooth");
-    expect(qualityToLatency("balanced")).toBe("balanced");
   });
 });
 describe("language lists", () => {

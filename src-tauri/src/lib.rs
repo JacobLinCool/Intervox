@@ -439,9 +439,7 @@ pub fn run() {
 
                     match event.id().as_ref() {
                         // ── Mode items ──────────────────────────────────────
-                        id @ ("mode_silence"
-                        | "mode_passthrough"
-                        | "mode_translate") => {
+                        id @ ("mode_silence" | "mode_passthrough" | "mode_translate") => {
                             let mode = match id {
                                 "mode_silence" => VirtualMicMode::Silence,
                                 "mode_passthrough" => VirtualMicMode::PassThrough,
@@ -555,6 +553,7 @@ pub fn run() {
             commands::set_virtual_mic_mode,
             commands::get_audio_devices,
             commands::get_audio_levels,
+            commands::get_audio_backpressure_metrics,
             commands::set_source_mic,
             commands::set_monitor_output,
             commands::set_target_language,
@@ -577,7 +576,6 @@ pub fn run() {
             commands::set_api_key,
             commands::verify_api_key,
             commands::clear_api_key,
-            commands::set_quality_mode,
             commands::set_mix_percent,
             commands::set_captions_config,
             commands::set_privacy_config,

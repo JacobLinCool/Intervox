@@ -46,6 +46,7 @@ use super::ring::RingProducer;
 use super::translate_chain::{
     push_original_samples, SharedOriginalQueue, OPENAI_UPLINK_CHUNK_SAMPLES,
 };
+use super::AudioBackpressureCounters;
 
 /// Shared uplink slot type alias — mirrors the one in `engine/mod.rs`.
 type UplinkSlot = Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
@@ -111,17 +112,15 @@ pub(super) struct RouteFrameContext<'a> {
     pub uplink_chunker: &'a mut OpenAiChunker,
     /// Optional 48 kHz original-audio tap for Translate with original voice.
     pub original_queue: Option<&'a SharedOriginalQueue>,
+    /// Shared counters for lossy realtime backpressure paths.
+    pub backpressure: &'a AudioBackpressureCounters,
 }
 
 /// Route a single 48 kHz mono `frame` according to the current `mode`.
 ///
 /// Returns `true` only when a fixed 40 ms OpenAI uplink chunk was successfully
 /// enqueued to the realtime transport.
-pub(super) fn route_frame(
-    mode: VirtualMicMode,
-    frame: &[f32],
-    ctx: RouteFrameContext<'_>,
-) -> bool {
+pub(super) fn route_frame(mode: VirtualMicMode, frame: &[f32], ctx: RouteFrameContext<'_>) -> bool {
     let original_voice_percent = u32::from(ctx.original_queue.is_some());
     let routing = FrameRouting::for_mode_and_mix(mode, original_voice_percent);
 
@@ -146,6 +145,7 @@ pub(super) fn route_frame(
         //    - No-op when slot is empty (no active OpenAI session).
         let maybe_tx = ctx.uplink_slot.lock().clone();
         let Some(tx) = maybe_tx else {
+            ctx.backpressure.uplink_no_session_drop();
             ctx.uplink_chunker.clear();
             ctx.out_level.store(0, Ordering::Relaxed);
             return false;
@@ -159,7 +159,10 @@ pub(super) fn route_frame(
             // try_send is callable from a blocking thread (it does not .await).
             // Drop on full — never block, never grow latency.
             if tx.try_send(chunk).is_ok() {
+                ctx.backpressure.uplink_chunk_sent();
                 sent_to_openai = true;
+            } else {
+                ctx.backpressure.uplink_queue_drop();
             }
         });
 
@@ -316,14 +319,22 @@ mod tests {
 
         chunker.push(&vec![2; 560], |chunk| chunks.push(chunk));
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES);
+        assert_eq!(
+            chunks[0].len(),
+            translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES
+        );
         assert_eq!(chunker.pending_len(), 0);
 
-        chunker.push(&vec![3; translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES * 2 + 7], |chunk| {
-            chunks.push(chunk);
-        });
+        chunker.push(
+            &vec![3; translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES * 2 + 7],
+            |chunk| {
+                chunks.push(chunk);
+            },
+        );
         assert_eq!(chunks.len(), 3);
-        assert!(chunks.iter().all(|chunk| chunk.len() == translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() == translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES));
         assert_eq!(chunker.pending_len(), 7);
 
         chunker.clear();
@@ -409,7 +420,10 @@ mod tests {
             "Translate with original queue must NOT write raw mic to ring"
         );
         let rms = f32::from_bits(out_level.load(Ordering::Relaxed));
-        assert_eq!(rms, 0.0, "Translate with original queue must clear out_level to 0");
+        assert_eq!(
+            rms, 0.0,
+            "Translate with original queue must clear out_level to 0"
+        );
     }
 
     #[test]
@@ -487,7 +501,11 @@ mod tests {
                 &mut chunker,
                 None,
             );
-            assert_eq!(sent, i == 3, "only the fourth 10 ms frame completes a 40 ms chunk");
+            assert_eq!(
+                sent,
+                i == 3,
+                "only the fourth 10 ms frame completes a 40 ms chunk"
+            );
         }
 
         assert!(
@@ -495,7 +513,9 @@ mod tests {
             "Translate must NOT write raw mic to ring"
         );
 
-        let received = rx.try_recv().expect("uplink should have received one chunk");
+        let received = rx
+            .try_recv()
+            .expect("uplink should have received one chunk");
         assert_eq!(
             received.len(),
             translate_chain::OPENAI_UPLINK_CHUNK_SAMPLES,
@@ -554,6 +574,7 @@ mod tests {
                 resampler,
                 uplink_chunker: &mut chunker,
                 original_queue: None,
+                backpressure: &super::AudioBackpressureCounters::default(),
             },
         );
     }

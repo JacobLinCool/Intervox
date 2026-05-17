@@ -160,6 +160,27 @@ pub fn apply_mode(
     engine: &std::sync::Arc<crate::engine::Engine>,
     mode: VirtualMicMode,
 ) -> Result<(), AppError> {
+    apply_mode_state(h, mode)?;
+    engine.set_mode(mode);
+    emit_status(app, h);
+    update_mode_tray(app, h, mode);
+    Ok(())
+}
+
+async fn apply_mode_async(
+    app: &tauri::AppHandle,
+    h: &AppHandle,
+    engine: std::sync::Arc<crate::engine::Engine>,
+    mode: VirtualMicMode,
+) -> Result<(), AppError> {
+    apply_mode_state(h, mode)?;
+    run_engine_control("set virtual mic mode", move || engine.set_mode(mode)).await?;
+    emit_status(app, h);
+    update_mode_tray(app, h, mode);
+    Ok(())
+}
+
+fn apply_mode_state(h: &AppHandle, mode: VirtualMicMode) -> Result<(), AppError> {
     let mode_string = serde_json::to_value(mode)
         .unwrap()
         .as_str()
@@ -171,23 +192,24 @@ pub fn apply_mode(
     })?;
 
     h.state.lock().unwrap().transition(mode);
+    Ok(())
+}
 
-    engine.set_mode(mode);
-
+fn emit_status(app: &tauri::AppHandle, h: &AppHandle) {
     let status = h.state.lock().unwrap().status.clone();
-    {
-        use tauri::Emitter;
-        let _ = app.emit("status-changed", status);
-    }
+    use tauri::Emitter;
+    let _ = app.emit("status-changed", status);
+}
 
-    // 6. Update tray title + checked-state (best-effort; errors ignored).
-    // FIX-5: never hold two MutexGuards at once — read each field with a
-    // single-lock statement so the guard is dropped at the semicolon.
+fn update_mode_tray(app: &tauri::AppHandle, h: &AppHandle, mode: VirtualMicMode) {
+    // Update tray title + checked-state (best-effort; errors ignored).
+    // Never hold two MutexGuards at once: read each field with a single-lock
+    // statement so the guard is dropped at the semicolon.
     use tauri::Manager as _;
     if let Some(tray_state) = app.try_state::<TrayState>() {
         let label = tray_mode_label(mode);
         let show_badge = h.config.lock().unwrap().ui.show_latency_badge; // guard dropped at ;
-        let latency = h.state.lock().unwrap().status.latency_ms;          // guard dropped at ;
+        let latency = h.state.lock().unwrap().status.latency_ms; // guard dropped at ;
         let title = crate::platform_integration::tray_title(label, show_badge, latency);
         let _ = tray_state.tray.set_title(Some(title.as_str()));
         let checks = tray_menu_checks(mode);
@@ -195,7 +217,15 @@ pub fn apply_mode(
         let _ = tray_state.mode_passthrough.set_checked(checks[1]);
         let _ = tray_state.mode_translate.set_checked(checks[2]);
     }
-    Ok(())
+}
+
+async fn run_engine_control<F>(label: &'static str, f: F) -> Result<(), AppError>
+where
+    F: FnOnce() + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::internal(format!("{label} task failed: {e}")))
 }
 
 // ── Tray managed state ─────────────────────────────────────────────────────────
@@ -249,18 +279,21 @@ pub fn get_app_status(
 }
 
 #[tauri::command]
-pub fn set_virtual_mic_mode(
+pub async fn set_virtual_mic_mode(
     mode: VirtualMicMode,
     app: tauri::AppHandle,
     h: tauri::State<'_, AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    apply_mode(&app, &h, &engine, mode)
+    apply_mode_async(&app, &h, std::sync::Arc::clone(&engine), mode).await
 }
 
 #[tauri::command]
-pub async fn get_audio_devices(h: tauri::State<'_, AppHandle>) -> Result<AudioDevices, AppError> {
-    let devices = enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
+pub async fn get_audio_devices(
+    h: tauri::State<'_, AppHandle>,
+) -> Result<AudioDevices, AppError> {
+    let devices =
+        enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
     set_driver_state_from_devices(&h, &devices);
     Ok(devices)
 }
@@ -277,21 +310,30 @@ pub fn get_audio_levels(
 }
 
 #[tauri::command]
-pub fn set_source_mic(
+pub fn get_audio_backpressure_metrics(
+    engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
+) -> Result<crate::engine::AudioBackpressureMetrics, AppError> {
+    Ok(engine.backpressure_metrics())
+}
+
+#[tauri::command]
+pub async fn set_source_mic(
     device_id: String,
     app: tauri::AppHandle,
-    h: tauri::State<AppHandle>,
+    h: tauri::State<'_, AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
     update_config(&h, |cfg| {
         cfg.audio.source_mic_id = Some(device_id.clone());
     })?;
-    h.state.lock().unwrap().status.source_mic_name = Some(device_label_from_id(&device_id));
-    engine.set_source_device(device_id);
-    {
-        use tauri::Emitter;
-        let _ = app.emit("status-changed", h.state.lock().unwrap().status.clone());
-    }
+    h.state.lock().unwrap().status.source_mic_name =
+        Some(device_label_from_id(&device_id));
+    let engine = std::sync::Arc::clone(&engine);
+    run_engine_control("set source microphone", move || {
+        engine.set_source_device(device_id);
+    })
+    .await?;
+    emit_status(&app, &h);
     Ok(())
 }
 
@@ -322,7 +364,7 @@ pub fn set_target_language(
     };
     {
         h.state.lock().unwrap().status.target_language = language;
-    } // state MutexGuard dropped
+    }
     // Drive the engine — only restarts an active OpenAI session; no-op in Silence/PassThrough.
     engine.set_target_language(tgt);
     {
@@ -824,14 +866,6 @@ pub fn get_config(h: tauri::State<AppHandle>) -> Result<Config, AppError> {
     let mut cfg = h.config.lock().unwrap().clone();
     cfg.account.openai_api_key = None;
     Ok(cfg)
-}
-
-#[tauri::command]
-pub fn set_quality_mode(quality: String, h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    update_config(&h, |cfg| {
-        cfg.translation.quality_mode = quality;
-    })?;
-    Ok(())
 }
 
 #[tauri::command]

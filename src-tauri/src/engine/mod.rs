@@ -68,6 +68,65 @@ type SharedJitterBuf = Arc<Mutex<JitterBuffer>>;
 /// of the `Option<Sender>` which is a few nanoseconds.
 type UplinkSlot = Arc<Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
 
+#[derive(Debug, Default)]
+pub struct AudioBackpressureCounters {
+    capture_pool_misses: AtomicU64,
+    capture_capacity_drops: AtomicU64,
+    capture_sink_drops: AtomicU64,
+    uplink_no_session_drops: AtomicU64,
+    uplink_queue_drops: AtomicU64,
+    uplink_chunks_sent: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioBackpressureMetrics {
+    pub capture_pool_misses: u64,
+    pub capture_capacity_drops: u64,
+    pub capture_sink_drops: u64,
+    pub uplink_no_session_drops: u64,
+    pub uplink_queue_drops: u64,
+    pub uplink_chunks_sent: u64,
+}
+
+impl AudioBackpressureCounters {
+    pub(crate) fn capture_pool_miss(&self) {
+        self.capture_pool_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn capture_capacity_drop(&self) {
+        self.capture_capacity_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn capture_sink_drop(&self) {
+        self.capture_sink_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn uplink_no_session_drop(&self) {
+        self.uplink_no_session_drops
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn uplink_queue_drop(&self) {
+        self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn uplink_chunk_sent(&self) {
+        self.uplink_chunks_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> AudioBackpressureMetrics {
+        AudioBackpressureMetrics {
+            capture_pool_misses: self.capture_pool_misses.load(Ordering::Relaxed),
+            capture_capacity_drops: self.capture_capacity_drops.load(Ordering::Relaxed),
+            capture_sink_drops: self.capture_sink_drops.load(Ordering::Relaxed),
+            uplink_no_session_drops: self.uplink_no_session_drops.load(Ordering::Relaxed),
+            uplink_queue_drops: self.uplink_queue_drops.load(Ordering::Relaxed),
+            uplink_chunks_sent: self.uplink_chunks_sent.load(Ordering::Relaxed),
+        }
+    }
+}
+
 // ── Inner state ───────────────────────────────────────────────────────────────
 
 struct Inner {
@@ -147,6 +206,10 @@ pub struct Engine {
     /// (`Translate`, `Silence`, `PassThrough`) incur zero cost: the slot is
     /// `None` when not mixing.
     original_queue_slot: Arc<Mutex<Option<SharedOriginalQueue>>>,
+
+    /// Process-wide counters for intentionally lossy audio backpressure paths.
+    /// Updated from realtime capture/graph code with relaxed atomics only.
+    backpressure: Arc<AudioBackpressureCounters>,
 
     // ── Task 4.4: latency metrics and OpenAI session lifecycle ────────────────
     /// Timestamp of the most recent successful PCM16 uplink send.
@@ -255,6 +318,7 @@ impl Engine {
             mode_atomic: Arc::new(AtomicU32::new(mode_to_ring_u32(VirtualMicMode::Silence))),
             uplink_slot: Arc::new(Mutex::new(None)),
             original_queue_slot: Arc::new(Mutex::new(None)),
+            backpressure: Arc::new(AudioBackpressureCounters::default()),
             last_send_time: Arc::new(Mutex::new(None)),
             audio_flowing: Arc::new(AtomicBool::new(false)),
             session_active: Arc::new(AtomicBool::new(false)),
@@ -407,7 +471,8 @@ impl Engine {
         // Task 9: push "connecting" AFTER the inner guard is released — mirrors
         // the "closed" push pattern at the bottom of stop_openai_session_locked.
         if let Some(new_tgt) = connecting_tgt {
-            self.conn_log.push("connecting", format!("target={new_tgt}"));
+            self.conn_log
+                .push("connecting", format!("target={new_tgt}"));
         }
     }
 
@@ -500,6 +565,10 @@ impl Engine {
             f32::from_bits(self.level.load(Ordering::Relaxed)),
             f32::from_bits(self.out_level.load(Ordering::Relaxed)),
         )
+    }
+
+    pub fn backpressure_metrics(&self) -> AudioBackpressureMetrics {
+        self.backpressure.snapshot()
     }
 
     /// Shared handle to the ring producer (for the audio pipeline).
@@ -595,8 +664,7 @@ impl Engine {
         // Uplink channel: graph loop → realtime transport.
         // 8 chunks × 40 ms = 320 ms max queued uplink audio before frames are
         // dropped. Drops are acceptable; seconds of delayed mic audio are not.
-        let (pcm_tx, pcm_rx) =
-            tokio::sync::mpsc::channel::<Vec<i16>>(OPENAI_UPLINK_QUEUE_BOUND);
+        let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(OPENAI_UPLINK_QUEUE_BOUND);
 
         // Event channel: realtime transport → event consumer.
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<TranslationEvent>(128);
@@ -1097,7 +1165,9 @@ impl Engine {
                                 );
                                 let label = crate::commands::tray_mode_label(mode);
                                 let title = crate::platform_integration::tray_title(
-                                    label, true, Some(total),
+                                    label,
+                                    true,
+                                    Some(total),
                                 );
                                 let _ = tray_state.tray.set_title(Some(title.as_str()));
                             }
@@ -1198,23 +1268,32 @@ impl Engine {
         let device_id = g.source_device_id.as_deref().map(str::to_owned);
         let level = Arc::clone(&self.level);
         let app = self.app.clone();
+        let backpressure = Arc::clone(&self.backpressure);
 
-        match capture::start(device_id.as_deref(), level, app) {
+        match capture::start(device_id.as_deref(), level, app, backpressure) {
             Ok((handle, rx)) => {
                 g.capture = Some(handle);
 
                 // Spawn ~20 Hz level-emit task — emits BOTH input and output levels.
                 let level_arc = Arc::clone(&self.level);
                 let out_level_arc = Arc::clone(&self.out_level);
+                let level_backpressure = Arc::clone(&self.backpressure);
                 let level_app = self.app.clone();
                 let level_task = tauri::async_runtime::spawn(async move {
                     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+                    let mut backpressure_tick = 0_u8;
                     loop {
                         tick.tick().await;
                         let in_rms = f32::from_bits(level_arc.load(Ordering::Relaxed));
                         let out_rms = f32::from_bits(out_level_arc.load(Ordering::Relaxed));
                         let _ = level_app.emit("input-level", in_rms);
                         let _ = level_app.emit("output-level", out_rms);
+                        backpressure_tick = backpressure_tick.saturating_add(1);
+                        if backpressure_tick >= 20 {
+                            backpressure_tick = 0;
+                            let _ = level_app
+                                .emit("audio-backpressure", level_backpressure.snapshot());
+                        }
                     }
                 });
                 g.level_task = Some(level_task);
@@ -1235,6 +1314,7 @@ impl Engine {
                 let out_level_arc = Arc::clone(&self.out_level);
                 let uplink_slot = Arc::clone(&self.uplink_slot);
                 let original_queue_slot = Arc::clone(&self.original_queue_slot);
+                let graph_backpressure = Arc::clone(&self.backpressure);
                 // Task 4.4: stamp the last-send time in the graph loop so
                 // ev_task can compute openai_first_audio_ms.
                 let graph_last_send = Arc::clone(&self.last_send_time);
@@ -1261,6 +1341,7 @@ impl Engine {
                                     resampler: &mut resampler,
                                     uplink_chunker: &mut uplink_chunker,
                                     original_queue: oq.as_ref(),
+                                    backpressure: &graph_backpressure,
                                 },
                             );
                             // Task 4.4: stamp only after a fixed 40 ms OpenAI
@@ -1398,7 +1479,8 @@ impl Engine {
         let device_id = g.source_device_id.as_deref().map(str::to_owned);
         let level = Arc::clone(&self.level);
         let app = self.app.clone();
-        let (handle, rx) = capture::start(device_id.as_deref(), level, app)?;
+        let backpressure = Arc::new(AudioBackpressureCounters::default());
+        let (handle, rx) = capture::start(device_id.as_deref(), level, app, backpressure)?;
         drop(rx);
         g.probe_capture = Some(handle);
 
@@ -1452,5 +1534,30 @@ impl Engine {
         self.out_level.store(0, Ordering::Relaxed);
         let _ = self.app.emit("input-level", 0.0f32);
         let _ = self.app.emit("output-level", 0.0f32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioBackpressureCounters;
+
+    #[test]
+    fn backpressure_snapshot_reports_all_counter_totals() {
+        let counters = AudioBackpressureCounters::default();
+
+        counters.capture_pool_miss();
+        counters.capture_capacity_drop();
+        counters.capture_sink_drop();
+        counters.uplink_no_session_drop();
+        counters.uplink_queue_drop();
+        counters.uplink_chunk_sent();
+
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot.capture_pool_misses, 1);
+        assert_eq!(snapshot.capture_capacity_drops, 1);
+        assert_eq!(snapshot.capture_sink_drops, 1);
+        assert_eq!(snapshot.uplink_no_session_drops, 1);
+        assert_eq!(snapshot.uplink_queue_drops, 1);
+        assert_eq!(snapshot.uplink_chunks_sent, 1);
     }
 }
