@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const RING_CAP: usize = 200;
 const FILE_CAP_BYTES: u64 = 1_000_000;
@@ -23,9 +23,42 @@ pub struct ConnectionLog {
 }
 
 fn log_path() -> PathBuf {
-    let base = dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
+    let base =
+        dirs::config_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
     base.join("app.intervox.desktop").join("connection.log")
+}
+
+fn append_file_best_effort(path: &Path, line: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > FILE_CAP_BYTES {
+            if let Ok(content) = std::fs::read(path) {
+                let keep_from = content.len().saturating_sub(FILE_CAP_BYTES as usize / 2);
+                // Trim to the start of the next line so the file stays line-aligned.
+                let slice = &content[keep_from..];
+                let start = slice
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let _ = std::fs::write(path, &slice[start..]);
+            }
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 impl ConnectionLog {
@@ -42,34 +75,11 @@ impl ConnectionLog {
             }
             r.push_back(e.clone());
         }
-        let p = log_path();
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(meta) = std::fs::metadata(&p) {
-            if meta.len() > FILE_CAP_BYTES {
-                if let Ok(content) = std::fs::read(&p) {
-                    let keep_from =
-                        content.len().saturating_sub(FILE_CAP_BYTES as usize / 2);
-                    // Trim to the start of the next line so the file stays line-aligned.
-                    let slice = &content[keep_from..];
-                    let start = slice
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    let _ = std::fs::write(&p, &slice[start..]);
-                }
-            }
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-            let _ = writeln!(f, "{} [{}] {}", e.ts, e.kind, e.detail);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-            }
-        }
+        let path = log_path();
+        let line = format!("{} [{}] {}", e.ts, e.kind, e.detail);
+        let _ = std::thread::Builder::new()
+            .name("connection-log-write".into())
+            .spawn(move || append_file_best_effort(&path, &line));
     }
 
     #[allow(dead_code)]

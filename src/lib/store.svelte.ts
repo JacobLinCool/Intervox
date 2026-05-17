@@ -6,6 +6,7 @@ import type {
   AppStatus,
   AudioBackpressureMetrics,
   AudioDevices,
+  AudioMeterFrame,
   Config,
   DriverState,
   MicPermission,
@@ -15,9 +16,29 @@ import {
   ALL_LANGS, SOURCE_LANGS,
   isSameLang, langPair,
 } from "./constants";
-import type { UiMode, LangCtx } from "./constants";
+import type { BackendMode, UiMode, LangCtx } from "./constants";
 
 const AUDIO_INPUT_DETECTED_RMS = 0.0001;
+const MODE_COMMAND_TIMEOUT_MS = 5_000;
+
+function timeoutError(message: string): AppError {
+  return {
+    code: "MODE_SWITCH_TIMEOUT",
+    title: "Mode switch timed out",
+    message,
+    recovery_action: null,
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 function zeroBackpressureMetrics(): AudioBackpressureMetrics {
   return {
@@ -54,6 +75,36 @@ export function indicatorState(
 
 export type ChipView = { tone: "ok" | "warn" | "error" | "neutral"; text: string };
 
+export type MeterProjection = {
+  inputLevel: number;
+  outputLevel: number;
+  inputMeterSequence: number;
+  outputMeterSequence: number;
+  meterFrameSequence: number;
+  meterEventCount: number;
+  meterInputActive: boolean;
+  meterOutputActive: boolean;
+  audioInputDetected: boolean;
+};
+
+export function applyMeterFrameProjection(
+  current: MeterProjection,
+  frame: AudioMeterFrame,
+): MeterProjection {
+  return {
+    inputLevel: frame.inputLevel,
+    outputLevel: frame.outputLevel,
+    inputMeterSequence: frame.inputSequence,
+    outputMeterSequence: frame.outputSequence,
+    meterFrameSequence: frame.sequence,
+    meterEventCount: current.meterEventCount + 1,
+    meterInputActive: frame.inputActive,
+    meterOutputActive: frame.outputActive,
+    audioInputDetected:
+      current.audioInputDetected || frame.inputLevel >= AUDIO_INPUT_DETECTED_RMS,
+  };
+}
+
 export function connectionChip(
   mode: UiMode,
   conn: "idle" | "connecting" | "connected" | "reconnecting" | "failed",
@@ -73,6 +124,20 @@ export function connectionChip(
     case "failed":
       return { tone: "error", text: errorTitle ?? "Translation disconnected" };
   }
+}
+
+export function statusWithMode(status: AppStatus | null, mode: BackendMode): AppStatus | null {
+  return status ? { ...status, mode } : null;
+}
+
+export function configWithMode(config: Config | null, mode: BackendMode): Config | null {
+  return config
+    ? { ...config, audio: { ...config.audio, virtual_mic_mode: mode } }
+    : null;
+}
+
+function isNonTranslatingBackendMode(mode: BackendMode): boolean {
+  return mode === "silence" || mode === "pass_through";
 }
 
 // ────────────────────────────────────────────────────────────
@@ -102,6 +167,12 @@ class Store {
   tgtText: string = $state("");
   inputLevel: number = $state(0);
   outputLevel: number = $state(0);
+  inputMeterSequence: number = $state(0);
+  outputMeterSequence: number = $state(0);
+  meterFrameSequence: number = $state(0);
+  meterEventCount: number = $state(0);
+  meterInputActive: boolean = $state(false);
+  meterOutputActive: boolean = $state(false);
   backpressure: AudioBackpressureMetrics = $state(zeroBackpressureMetrics());
   audioInputDetected: boolean = $state(false);
   lastError: AppError | null = $state(null);
@@ -111,7 +182,6 @@ class Store {
   settingsTab: string = $state("status");
   captionsOpen: boolean = $state(false);
   captionsWindowOpen: boolean = $state(false);
-  quickOpen: boolean = $state(false);
   onboardingOpen: boolean = $state(false);
 
 
@@ -127,13 +197,16 @@ class Store {
   private toastSeq = 0;
 
   private unlisten: UnlistenFn[] = [];
-  private removeMeterResyncListeners: (() => void) | null = null;
-  private meterSyncBusy = false;
+  private eventsInstalled = false;
   private backpressureSyncBusy = false;
+  private modeChangeGeneration = 0;
+  private pendingMode: { generation: number; mode: BackendMode } | null = null;
 
   // ── Lifecycle ──────────────────────────────────────────────
 
   async init(): Promise<void> {
+    this.installEventListeners();
+
     try {
       const [status, config, account, micPermission, driverState] = await Promise.all([
         cmd.getAppStatus(),
@@ -162,52 +235,75 @@ class Store {
     try { this.appVersion = await cmd.appVersion(); } catch {}
 
     void this.refreshDevices();
-    void this.syncMeterLevels();
     void this.syncBackpressureMetrics();
-    this.installMeterResyncListeners();
+  }
+
+  private installEventListeners(): void {
+    if (this.eventsInstalled) return;
+    this.eventsInstalled = true;
 
     // Subscribe to events — push unlisten fns
-    this.unlisten.push(await on.status((s) => {
-      this.status = s;
-      // Honest idle: clear transcripts when mode is not translating.
-      if (s.mode === "silence" || s.mode === "pass_through") this.clearTranscripts();
+    const install = (name: string, setup: () => Promise<UnlistenFn>) => {
+      void setup().then((unlisten) => {
+        this.traceFrontendLifecycle(`listener-installed:${name}`);
+        if (this.eventsInstalled) {
+          this.unlisten.push(unlisten);
+        } else {
+          unlisten();
+        }
+      }).catch(() => {
+        this.traceFrontendLifecycle(`listener-install-error:${name}`);
+        // A failed listener must not prevent initial backend state hydration.
+      });
+    };
+
+    install("meter", () => on.meter((frame) => {
+      this.applyMeterFrame(frame);
     }));
-    this.unlisten.push(await on.inputLevel((v) => {
-      this.applyLevels(v, this.outputLevel);
+    void cmd.recordFrontendMeterDiagnostics({
+      eventCount: this.meterEventCount,
+      frameSequence: this.meterFrameSequence,
+      inputSequence: this.inputMeterSequence,
+      outputSequence: this.outputMeterSequence,
+      inputLevel: this.inputLevel,
+      outputLevel: this.outputLevel,
+      inputActive: this.meterInputActive,
+      outputActive: this.meterOutputActive,
+    }).catch(() => {});
+
+    install("status", () => on.status((s) => {
+      this.traceFrontendLifecycle("status-event", s.mode);
+      this.applyStatusSnapshot(s);
     }));
-    this.unlisten.push(await on.outputLevel((v) => {
-      this.applyLevels(this.inputLevel, v);
-    }));
-    this.unlisten.push(await on.backpressure((m) => {
+    install("backpressure", () => on.backpressure((m) => {
       this.backpressure = m;
     }));
-    this.unlisten.push(await on.latency((v) => {
+    install("latency", () => on.latency((v) => {
       if (this.status) this.status = { ...this.status, latencyMs: v };
     }));
-    this.unlisten.push(await on.srcDelta((t) => {
+    install("src-delta", () => on.srcDelta((t) => {
       let s = this.srcText + t;
       if (s.length > 4000) s = s.slice(-4000);
       this.srcText = s;
       this.sourceDetected = true;
     }));
-    this.unlisten.push(await on.tgtDelta((t) => {
+    install("tgt-delta", () => on.tgtDelta((t) => {
       let s = this.tgtText + t;
       if (s.length > 4000) s = s.slice(-4000);
       this.tgtText = s;
     }));
-    this.unlisten.push(await on.devices((d) => { this.devices = d; }));
-    this.unlisten.push(await on.error((e) => { this.lastError = e; }));
+    install("devices", () => on.devices((d) => { this.devices = d; }));
+    install("error", () => on.error((e) => { this.lastError = e; }));
     // transcript-cleared: the Rust clear_transcript_history command has already
     // ended the active session log and deleted the on-disk JSONL files; this
     // listener just zeroes the live in-session buffers so the UI reflects it.
-    this.unlisten.push(await on.transcriptCleared(() => { this.clearTranscripts(); }));
+    install("transcript-cleared", () => on.transcriptCleared(() => { this.clearTranscripts(); }));
   }
 
   dispose(): void {
     for (const fn of this.unlisten) fn();
     this.unlisten = [];
-    this.removeMeterResyncListeners?.();
-    this.removeMeterResyncListeners = null;
+    this.eventsInstalled = false;
   }
 
   // ── Derived getters ────────────────────────────────────────
@@ -291,11 +387,44 @@ class Store {
       await fn();
       return true;
     } catch (e: unknown) {
-      if (e && typeof e === "object" && "code" in e && "message" in e) {
-        this.lastError = e as AppError;
-      }
+      this.captureAppError(e);
       return false;
     }
+  }
+
+  private captureAppError(e: unknown): void {
+    if (e && typeof e === "object" && "code" in e && "message" in e) {
+      this.lastError = e as AppError;
+    }
+  }
+
+  private traceFrontendLifecycle(
+    event: string,
+    mode: BackendMode | null = null,
+    elapsedMs: number | null = null,
+  ): void {
+    void cmd.recordFrontendLifecycleDiagnostics({
+      event,
+      mode,
+      statusMode: this.status?.mode ?? null,
+      configMode: this.config?.audio.virtual_mic_mode ?? null,
+      modeGeneration: this.pendingMode?.generation ?? null,
+      elapsedMs,
+    }).catch(() => {});
+  }
+
+  private applyStatusSnapshot(status: AppStatus): boolean {
+    const pending = this.pendingMode;
+    if (pending && status.mode !== pending.mode) {
+      this.traceFrontendLifecycle("status-event-ignored-stale", status.mode);
+      return false;
+    }
+
+    this.status = status;
+    this.config = configWithMode(this.config, status.mode);
+    this.applyLevels(status.inputLevel, status.outputLevel);
+    if (isNonTranslatingBackendMode(status.mode)) this.clearTranscripts();
+    return true;
   }
 
   private applyLevels(inputLevel: number, outputLevel: number): void {
@@ -304,16 +433,42 @@ class Store {
     if (inputLevel >= AUDIO_INPUT_DETECTED_RMS) this.audioInputDetected = true;
   }
 
-  private async syncMeterLevels(): Promise<void> {
-    if (this.meterSyncBusy) return;
-    this.meterSyncBusy = true;
-    try {
-      const levels = await cmd.getAudioLevels();
-      this.applyLevels(levels.inputLevel, levels.outputLevel);
-    } catch {
-      // Event listeners carry realtime updates; this is only a foreground snapshot.
-    } finally {
-      this.meterSyncBusy = false;
+  private applyMeterFrame(frame: AudioMeterFrame): void {
+    const next = applyMeterFrameProjection(
+      {
+        inputLevel: this.inputLevel,
+        outputLevel: this.outputLevel,
+        inputMeterSequence: this.inputMeterSequence,
+        outputMeterSequence: this.outputMeterSequence,
+        meterFrameSequence: this.meterFrameSequence,
+        meterEventCount: this.meterEventCount,
+        meterInputActive: this.meterInputActive,
+        meterOutputActive: this.meterOutputActive,
+        audioInputDetected: this.audioInputDetected,
+      },
+      frame,
+    );
+    this.inputLevel = next.inputLevel;
+    this.outputLevel = next.outputLevel;
+    this.inputMeterSequence = next.inputMeterSequence;
+    this.outputMeterSequence = next.outputMeterSequence;
+    this.meterFrameSequence = next.meterFrameSequence;
+    this.meterEventCount = next.meterEventCount;
+    this.meterInputActive = next.meterInputActive;
+    this.meterOutputActive = next.meterOutputActive;
+    this.audioInputDetected = next.audioInputDetected;
+
+    if (this.meterEventCount > 0 && this.meterEventCount % 20 === 0) {
+      void cmd.recordFrontendMeterDiagnostics({
+        eventCount: this.meterEventCount,
+        frameSequence: this.meterFrameSequence,
+        inputSequence: this.inputMeterSequence,
+        outputSequence: this.outputMeterSequence,
+        inputLevel: this.inputLevel,
+        outputLevel: this.outputLevel,
+        inputActive: this.meterInputActive,
+        outputActive: this.meterOutputActive,
+      }).catch(() => {});
     }
   }
 
@@ -329,32 +484,45 @@ class Store {
     }
   }
 
-  private installMeterResyncListeners(): void {
-    if (this.removeMeterResyncListeners) return;
-    if (typeof window === "undefined" || typeof document === "undefined") return;
-
-    const sync = () => {
-      void this.syncMeterLevels();
-      void this.syncBackpressureMetrics();
-    };
-    const syncWhenVisible = () => {
-      if (document.visibilityState === "visible") sync();
-    };
-
-    window.addEventListener("focus", sync);
-    document.addEventListener("visibilitychange", syncWhenVisible);
-    this.removeMeterResyncListeners = () => {
-      window.removeEventListener("focus", sync);
-      document.removeEventListener("visibilitychange", syncWhenVisible);
-    };
-  }
-
   async setMode(m: UiMode): Promise<void> {
-    const ok = await this.tryCmd(() => cmd.setMode(modeToBackend(m)));
-    if (ok) {
-      await this.refreshStatus();
-      if (this.config) this.config.audio.virtual_mic_mode = modeToBackend(m);
-      if (m === "silence" || m === "pass") this.clearTranscripts();
+    const mode = modeToBackend(m);
+    const generation = ++this.modeChangeGeneration;
+    const started = performance.now();
+
+    this.pendingMode = { generation, mode };
+    this.traceFrontendLifecycle("mode-set-start", mode);
+
+    try {
+      await withTimeout(
+        cmd.setMode(mode),
+        MODE_COMMAND_TIMEOUT_MS,
+        `Backend did not confirm ${m} mode within ${MODE_COMMAND_TIMEOUT_MS / 1000}s.`,
+      );
+    } catch (e: unknown) {
+      if (this.pendingMode?.generation === generation) {
+        this.pendingMode = null;
+      }
+      this.captureAppError(e);
+      this.traceFrontendLifecycle("mode-set-error", mode, Math.round(performance.now() - started));
+      return;
+    }
+
+    this.traceFrontendLifecycle("mode-set-command-ok", mode, Math.round(performance.now() - started));
+    if (this.pendingMode?.generation !== generation) return;
+
+    try {
+      const status = await cmd.getAppStatus();
+      if (this.pendingMode?.generation === generation) {
+        this.applyStatusSnapshot(status);
+      }
+    } catch {
+      // The optimistic projection is already the intended local state; the next
+      // status event will reconcile native fields such as levels or connection.
+    } finally {
+      if (this.pendingMode?.generation === generation) {
+        this.pendingMode = null;
+      }
+      this.traceFrontendLifecycle("mode-set-done", mode, Math.round(performance.now() - started));
     }
   }
 
@@ -369,7 +537,8 @@ class Store {
     const previousId = this.config?.audio.source_mic_id ?? null;
     const previousName = this.status?.sourceMicName ?? null;
     const nextName =
-      this.devices.inputs.find((d) => d.id === id)?.name ?? id.replace(/^coreaudio:/, "");
+      this.devices.inputs.find((d) => d.id === id)?.name
+        ?? id.replace(/^coreaudio:uid:/, "CoreAudio device ");
     if (this.config) this.config.audio.source_mic_id = id;
     if (this.status) this.status = { ...this.status, sourceMicName: nextName };
 
@@ -476,7 +645,7 @@ class Store {
 
   async refreshStatus(): Promise<void> {
     try {
-      this.status = await cmd.getAppStatus();
+      this.applyStatusSnapshot(await cmd.getAppStatus());
     } catch {
       // leave existing value
     }
@@ -493,6 +662,7 @@ class Store {
   async refreshDevices(): Promise<void> {
     try {
       this.devices = await cmd.getAudioDevices();
+      this.config = await cmd.getConfig();
       await this.refreshStatus();
       await this.refreshDriverState();
     } catch {
@@ -616,7 +786,6 @@ class Store {
   // UI setters
   setSettingsTab(t: string): void { this.settingsTab = t; }
   setCaptionsOpen(b: boolean): void { this.captionsOpen = b; }
-  setQuickOpen(b: boolean): void { this.quickOpen = b; }
   setOnboardingOpen(b: boolean): void { this.onboardingOpen = b; }
   setTheme(t: "light" | "dark"): void { this.theme = t; }
   setWallpaper(w: string): void { this.wallpaper = w; }
@@ -639,7 +808,7 @@ class Store {
     }
   }
 
-  quit(): void { void cmd.closeWindow(); }
+  quit(): void { void cmd.quitApp(); }
 
 }
 

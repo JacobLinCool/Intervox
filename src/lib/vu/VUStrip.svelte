@@ -14,12 +14,7 @@
     seed?: number;
   } = $props();
 
-  let peak = $state(0);
   const displayLevel = $derived(rmsToVuLevel(level));
-
-  $effect(() => {
-    peak = Math.max(displayLevel, peak * 0.95);
-  });
 </script>
 
 <div
@@ -42,18 +37,6 @@
       background: `linear-gradient(90deg, ${color}, color-mix(in oklch, ${color} 60%, white))`,
       borderRadius: height / 2,
       transition: "width 80ms linear",
-    })}
-  ></div>
-  <div
-    style={css({
-      position: "absolute",
-      top: -1,
-      bottom: -1,
-      left: "calc(" + peak * 100 + "% - 1px)",
-      width: 2,
-      background: "rgba(0,0,0,0.35)",
-      borderRadius: 1,
-      transition: "left 120ms ease-out",
     })}
   ></div>
 </div>

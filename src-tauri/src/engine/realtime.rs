@@ -98,16 +98,14 @@ fn handshake_status(err: &WsError) -> Option<u16> {
 static SAFETY_ID: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
 
 pub fn safety_identifier() -> Result<String, String> {
-    SAFETY_ID
-        .get_or_init(resolve_safety_identifier)
-        .clone()
+    SAFETY_ID.get_or_init(resolve_safety_identifier).clone()
 }
 
 fn resolve_safety_identifier() -> Result<String, String> {
     use std::io::Read;
 
-    let base = dirs::config_dir()
-        .ok_or_else(|| "platform config directory is unavailable".to_string())?;
+    let base =
+        dirs::config_dir().ok_or_else(|| "platform config directory is unavailable".to_string())?;
     let dir = base.join("app.intervox.desktop");
     let id_path = dir.join("install-id");
 
@@ -351,7 +349,9 @@ pub async fn run(
                     let _ = ev_tx
                         .send(TranslationEvent::Error {
                             code: Some("AUTH".into()),
-                            message: "OpenAI rejected the API key for the realtime translation session".into(),
+                            message:
+                                "OpenAI rejected the API key for the realtime translation session"
+                                    .into(),
                         })
                         .await;
                     return RunExit::Terminal;

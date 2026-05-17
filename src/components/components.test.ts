@@ -117,17 +117,6 @@ describe("AdvancedPane clear history", () => {
   });
 });
 
-import QuickStatus from "./QuickStatus.svelte";
-import { render as r6 } from "@testing-library/svelte";
-describe("QuickStatus", () => {
-  it("is hidden when quickOpen is false (default)", () => {
-    const { container } = r6(QuickStatus as any);
-    // Svelte 5 {#if} renders <!---> as comment placeholder when false — no visible content
-    expect(container.querySelector("[role='menu']")).toBeNull(); // store.quickOpen defaults false
-    expect(container.textContent?.trim()).toBe("");
-  });
-});
-
 import Captions from "./Captions.svelte";
 import { render as r7 } from "@testing-library/svelte";
 describe("Captions honest", () => {

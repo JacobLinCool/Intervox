@@ -20,6 +20,11 @@ describe("vu meters honest idle", () => {
     // browser may render "width: 0%" (with space) — match both forms
     expect(container.innerHTML).toMatch(/width:\s*0%/);
   });
+  it("VUStrip renders only the current-level fill layer", () => {
+    const { container } = render(VUStrip as any, { props: { level: 0.2 } });
+    const strip = container.firstElementChild as HTMLElement;
+    expect(strip.children).toHaveLength(1);
+  });
   it("VUDots renders count dots", () => {
     const { container } = render(VUDots as any, { props: { level: 0, count: 4 } });
     expect(container.querySelectorAll("span > span").length).toBe(4);

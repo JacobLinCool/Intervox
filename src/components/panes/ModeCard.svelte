@@ -14,12 +14,15 @@
   } = $props();
 </script>
 
-<div
-  role="button"
-  tabindex="0"
+<button
+  type="button"
   onclick={onSelect}
-  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") onSelect(); }}
   style={css({
+    appearance: "none",
+    width: "100%",
+    textAlign: "left",
+    font: "inherit",
+    color: "inherit",
     cursor: "pointer",
     padding: 12,
     borderRadius: 10,
@@ -56,4 +59,4 @@
   <div style={css({ fontSize: 11.5, color: "var(--txt-3)", lineHeight: 1.45 })}>
     {meta.body}
   </div>
-</div>
+</button>

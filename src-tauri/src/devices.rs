@@ -38,9 +38,18 @@ const PROP_DEVICES: AudioObjectPropertySelector = 0x6465_7623; // 'dev#'
 const PROP_DEFAULT_INPUT: AudioObjectPropertySelector = 0x6449_6e20; // 'dIn '
 const PROP_DEFAULT_OUTPUT: AudioObjectPropertySelector = 0x644f_7574; // 'dOut'
 const PROP_DEVICE_NAME_CFSTRING: AudioObjectPropertySelector = 0x6c6e_616d; // 'lnam'
+const PROP_DEVICE_UID: AudioObjectPropertySelector = 0x7569_6420; // 'uid '
 const PROP_STREAMS: AudioObjectPropertySelector = 0x7374_6d23; // 'stm#'
 
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+pub const CORE_AUDIO_UID_PREFIX: &str = "coreaudio:uid:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedInputDevice {
+    pub uid: String,
+    pub name: String,
+    pub duplicate_name_count: usize,
+}
 
 #[link(name = "CoreAudio", kind = "framework")]
 extern "C" {
@@ -73,8 +82,9 @@ extern "C" {
 }
 
 /// Enumerate all available input and output audio devices. The system default
-/// device appears first in each list; subsequent devices with the same name are
-/// de-duplicated. On any CoreAudio error the relevant list is left empty.
+/// device appears first in each list; subsequent devices are keyed by CoreAudio
+/// UID, not display name. Display names are labels; UIDs are the identity that
+/// can survive hotplug and same-name devices.
 pub fn enumerate() -> AudioDevices {
     let devices = device_ids();
 
@@ -117,12 +127,65 @@ fn push_device(
     let Some(name) = device_name(id) else {
         return;
     };
-    if seen.insert(name.clone()) {
+    let Some(uid) = device_uid(id) else {
+        return;
+    };
+    if seen.insert(uid.clone()) {
         out.push(DeviceInfo {
-            id: format!("coreaudio:{name}"),
+            id: device_id_from_uid(&uid),
             name,
         });
     }
+}
+
+pub fn is_coreaudio_uid_id(device_id: &str) -> bool {
+    device_id.starts_with(CORE_AUDIO_UID_PREFIX)
+}
+
+pub fn device_id_from_uid(uid: &str) -> String {
+    format!("{CORE_AUDIO_UID_PREFIX}{uid}")
+}
+
+pub fn uid_from_device_id(device_id: &str) -> Option<&str> {
+    device_id.strip_prefix(CORE_AUDIO_UID_PREFIX)
+}
+
+pub fn input_device_name_for_id(device_id: &str) -> Option<String> {
+    resolve_input_device_id(device_id).map(|device| device.name)
+}
+
+pub fn resolve_input_device_id(device_id: &str) -> Option<ResolvedInputDevice> {
+    let target_uid = uid_from_device_id(device_id)?;
+    let devices = device_ids();
+    let mut selected = None;
+    let mut input_names = Vec::new();
+
+    for id in devices {
+        if !has_streams(id, SCOPE_INPUT) {
+            continue;
+        }
+        let Some(uid) = device_uid(id) else {
+            continue;
+        };
+        let Some(name) = device_name(id) else {
+            continue;
+        };
+        if uid == target_uid {
+            selected = Some((uid, name.clone()));
+        }
+        input_names.push(name);
+    }
+
+    let (uid, name) = selected?;
+    let duplicate_name_count = input_names
+        .iter()
+        .filter(|candidate| candidate.as_str() == name.as_str())
+        .count();
+    Some(ResolvedInputDevice {
+        uid,
+        name,
+        duplicate_name_count,
+    })
 }
 
 fn property_address(
@@ -202,7 +265,18 @@ fn has_streams(id: AudioDeviceID, scope: AudioObjectPropertyScope) -> bool {
 }
 
 fn device_name(id: AudioDeviceID) -> Option<String> {
-    let address = property_address(PROP_DEVICE_NAME_CFSTRING, SCOPE_GLOBAL);
+    device_cfstring_property(id, PROP_DEVICE_NAME_CFSTRING)
+}
+
+fn device_uid(id: AudioDeviceID) -> Option<String> {
+    device_cfstring_property(id, PROP_DEVICE_UID)
+}
+
+fn device_cfstring_property(
+    id: AudioDeviceID,
+    selector: AudioObjectPropertySelector,
+) -> Option<String> {
+    let address = property_address(selector, SCOPE_GLOBAL);
     let mut size = std::mem::size_of::<*const c_void>() as u32;
     let mut string_ref: *const c_void = ptr::null();
     let status = unsafe {
@@ -242,6 +316,15 @@ fn device_name(id: AudioDeviceID) -> Option<String> {
 mod tests {
     use super::*;
     use cpal::traits::DeviceTrait;
+
+    #[test]
+    fn coreaudio_uid_device_id_round_trips() {
+        let id = device_id_from_uid("AppleUSBAudioEngine:Example");
+        assert_eq!(id, "coreaudio:uid:AppleUSBAudioEngine:Example");
+        assert!(is_coreaudio_uid_id(&id));
+        assert_eq!(uid_from_device_id(&id), Some("AppleUSBAudioEngine:Example"));
+        assert_eq!(uid_from_device_id("coreaudio:Studio Display"), None);
+    }
 
     /// Hardware-dependent: `enumerate()` enters CoreAudio. Keep this out of the
     /// default unit-test path so a wedged audio daemon cannot hang `cargo test`.

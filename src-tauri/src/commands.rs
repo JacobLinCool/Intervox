@@ -17,12 +17,19 @@ use std::time::Duration;
 use crate::driver_status::DriverState;
 use crate::permission::MicPermission;
 
+fn lifecycle_trace(message: impl AsRef<str>) {
+    if std::env::var_os("INTERVOX_LIFECYCLE_TRACE").is_some() {
+        eprintln!("[intervox:lifecycle] {}", message.as_ref());
+    }
+}
+
 #[derive(Default)]
 pub struct AppHandle {
     pub state: Mutex<AppState>,
     pub config: Mutex<Config>,
     pub driver_state: Mutex<DriverState>,
     pub audio_enumeration_running: Arc<AtomicBool>,
+    pub frontend_meter: Mutex<FrontendMeterDiagnostics>,
 }
 
 impl AppHandle {
@@ -43,6 +50,7 @@ impl AppHandle {
             config: Mutex::new(cfg),
             driver_state: Mutex::new(crate::driver_status::state_from_install_only()),
             audio_enumeration_running: Arc::new(AtomicBool::new(false)),
+            frontend_meter: Mutex::new(FrontendMeterDiagnostics::default()),
         }
     }
 }
@@ -82,6 +90,7 @@ pub async fn enumerate_audio_devices_bounded(
 }
 
 fn set_driver_state_from_devices(h: &AppHandle, devices: &AudioDevices) -> DriverState {
+    canonicalize_source_mic_id_from_devices(h, devices);
     let driver_state = crate::driver_status::state_from_devices(devices);
     *h.driver_state.lock().unwrap() = driver_state;
     h.state.lock().unwrap().status.virtual_mic_installed = driver_state == DriverState::Healthy;
@@ -90,10 +99,45 @@ fn set_driver_state_from_devices(h: &AppHandle, devices: &AudioDevices) -> Drive
 }
 
 fn device_label_from_id(device_id: &str) -> String {
-    device_id
-        .strip_prefix("coreaudio:")
-        .unwrap_or(device_id)
-        .to_string()
+    if let Some(label) = legacy_coreaudio_name_id(device_id) {
+        return label.to_string();
+    }
+    crate::devices::uid_from_device_id(device_id)
+        .map(|uid| format!("CoreAudio device {uid}"))
+        .unwrap_or_else(|| device_id.to_string())
+}
+
+fn legacy_coreaudio_name_id(device_id: &str) -> Option<&str> {
+    if crate::devices::is_coreaudio_uid_id(device_id) {
+        return None;
+    }
+    device_id.strip_prefix("coreaudio:")
+}
+
+fn canonicalize_source_mic_id_from_devices(h: &AppHandle, devices: &AudioDevices) {
+    let selected_id = h.config.lock().unwrap().audio.source_mic_id.clone();
+    let Some(selected_id) = selected_id else {
+        return;
+    };
+    let Some(legacy_name) = legacy_coreaudio_name_id(&selected_id) else {
+        return;
+    };
+
+    let mut matches = devices
+        .inputs
+        .iter()
+        .filter(|device| device.name == legacy_name);
+    let Some(device) = matches.next() else {
+        return;
+    };
+    if matches.next().is_some() {
+        return;
+    }
+
+    let canonical_id = device.id.clone();
+    let _ = update_config(h, |cfg| {
+        cfg.audio.source_mic_id = Some(canonical_id);
+    });
 }
 
 fn sync_source_mic_name_from_devices(h: &AppHandle, devices: &AudioDevices) {
@@ -160,10 +204,16 @@ pub fn apply_mode(
     engine: &std::sync::Arc<crate::engine::Engine>,
     mode: VirtualMicMode,
 ) -> Result<(), AppError> {
+    let started = std::time::Instant::now();
+    lifecycle_trace(format!("apply_mode sync start mode={mode:?}"));
     apply_mode_state(h, mode)?;
     engine.set_mode(mode);
     emit_status(app, h);
     update_mode_tray(app, h, mode);
+    lifecycle_trace(format!(
+        "apply_mode sync done mode={mode:?} elapsed_ms={}",
+        started.elapsed().as_millis()
+    ));
     Ok(())
 }
 
@@ -173,10 +223,20 @@ async fn apply_mode_async(
     engine: std::sync::Arc<crate::engine::Engine>,
     mode: VirtualMicMode,
 ) -> Result<(), AppError> {
+    let started = std::time::Instant::now();
+    lifecycle_trace(format!("apply_mode async start mode={mode:?}"));
     apply_mode_state(h, mode)?;
     run_engine_control("set virtual mic mode", move || engine.set_mode(mode)).await?;
+    lifecycle_trace(format!(
+        "apply_mode async engine_done mode={mode:?} elapsed_ms={}",
+        started.elapsed().as_millis()
+    ));
     emit_status(app, h);
     update_mode_tray(app, h, mode);
+    lifecycle_trace(format!(
+        "apply_mode async done mode={mode:?} elapsed_ms={}",
+        started.elapsed().as_millis()
+    ));
     Ok(())
 }
 
@@ -228,6 +288,26 @@ where
         .map_err(|e| AppError::internal(format!("{label} task failed: {e}")))
 }
 
+async fn run_engine_control_result<F, T>(label: &'static str, f: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> Result<T, AppError> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::internal(format!("{label} task failed: {e}")))?
+}
+
+async fn run_driver_control<F>(label: &'static str, f: F) -> Result<(), AppError>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::internal(format!("{label} task failed: {e}")))?
+        .map_err(AppError::internal)
+}
+
 // ── Tray managed state ─────────────────────────────────────────────────────────
 
 /// Holds the `TrayIcon` handle plus the 3 `CheckMenuItem` handles so that
@@ -253,11 +333,35 @@ pub struct AudioDevices {
     pub outputs: Vec<DeviceInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AudioLevels {
+pub struct FrontendMeterDiagnostics {
+    pub event_count: u64,
+    pub frame_sequence: u64,
+    pub input_sequence: u64,
+    pub output_sequence: u64,
     pub input_level: f32,
     pub output_level: f32,
+    pub input_active: bool,
+    pub output_active: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendLifecycleDiagnostics {
+    pub event: String,
+    pub mode: Option<VirtualMicMode>,
+    pub status_mode: Option<VirtualMicMode>,
+    pub config_mode: Option<String>,
+    pub mode_generation: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterPipelineDiagnostics {
+    pub backend: crate::engine::AudioMeterDiagnostics,
+    pub frontend: FrontendMeterDiagnostics,
 }
 
 #[tauri::command]
@@ -285,28 +389,31 @@ pub async fn set_virtual_mic_mode(
     h: tauri::State<'_, AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
+    lifecycle_trace(format!(
+        "command set_virtual_mic_mode received mode={mode:?}"
+    ));
     apply_mode_async(&app, &h, std::sync::Arc::clone(&engine), mode).await
 }
 
 #[tauri::command]
 pub async fn get_audio_devices(
     h: tauri::State<'_, AppHandle>,
-) -> Result<AudioDevices, AppError> {
-    let devices =
-        enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
-    set_driver_state_from_devices(&h, &devices);
-    Ok(devices)
-}
-
-#[tauri::command]
-pub fn get_audio_levels(
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
-) -> Result<AudioLevels, AppError> {
-    let (input_level, output_level) = engine.levels();
-    Ok(AudioLevels {
-        input_level,
-        output_level,
-    })
+) -> Result<AudioDevices, AppError> {
+    let source_before = h.config.lock().unwrap().audio.source_mic_id.clone();
+    let devices = enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
+    set_driver_state_from_devices(&h, &devices);
+    let source_after = h.config.lock().unwrap().audio.source_mic_id.clone();
+    if source_after != source_before {
+        if let Some(source_id) = source_after {
+            let engine = std::sync::Arc::clone(&engine);
+            let _ = run_engine_control_result("canonicalize source microphone", move || {
+                engine.set_source_device(source_id)
+            })
+            .await?;
+        }
+    }
+    Ok(devices)
 }
 
 #[tauri::command]
@@ -317,22 +424,80 @@ pub fn get_audio_backpressure_metrics(
 }
 
 #[tauri::command]
+pub fn get_audio_meter_diagnostics(
+    h: tauri::State<'_, AppHandle>,
+    engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
+) -> Result<AudioMeterPipelineDiagnostics, AppError> {
+    Ok(AudioMeterPipelineDiagnostics {
+        backend: engine.meter_diagnostics(),
+        frontend: h.frontend_meter.lock().unwrap().clone(),
+    })
+}
+
+#[tauri::command]
+pub fn record_frontend_meter_diagnostics(
+    h: tauri::State<'_, AppHandle>,
+    diagnostics: FrontendMeterDiagnostics,
+) -> Result<(), AppError> {
+    if std::env::var_os("INTERVOX_METER_TRACE").is_some() {
+        eprintln!(
+            "[intervox:meter:frontend] events={} frame={} input_seq={} output_seq={} input={:.6} output={:.6} input_active={} output_active={}",
+            diagnostics.event_count,
+            diagnostics.frame_sequence,
+            diagnostics.input_sequence,
+            diagnostics.output_sequence,
+            diagnostics.input_level,
+            diagnostics.output_level,
+            diagnostics.input_active,
+            diagnostics.output_active,
+        );
+    }
+    *h.frontend_meter.lock().unwrap() = diagnostics;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn record_frontend_lifecycle_diagnostics(
+    diagnostics: FrontendLifecycleDiagnostics,
+) -> Result<(), AppError> {
+    if std::env::var_os("INTERVOX_LIFECYCLE_TRACE").is_some() {
+        eprintln!(
+            "[intervox:lifecycle:frontend] event={} mode={:?} status_mode={:?} config_mode={:?} generation={:?} elapsed_ms={:?}",
+            diagnostics.event,
+            diagnostics.mode,
+            diagnostics.status_mode,
+            diagnostics.config_mode,
+            diagnostics.mode_generation,
+            diagnostics.elapsed_ms,
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn set_source_mic(
     device_id: String,
     app: tauri::AppHandle,
     h: tauri::State<'_, AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    update_config(&h, |cfg| {
-        cfg.audio.source_mic_id = Some(device_id.clone());
-    })?;
-    h.state.lock().unwrap().status.source_mic_name =
-        Some(device_label_from_id(&device_id));
+    let source_name = crate::devices::input_device_name_for_id(&device_id)
+        .unwrap_or_else(|| device_label_from_id(&device_id));
     let engine = std::sync::Arc::clone(&engine);
-    run_engine_control("set source microphone", move || {
-        engine.set_source_device(device_id);
+    let engine_device_id = device_id.clone();
+    let applied = run_engine_control_result("set source microphone", move || {
+        engine.set_source_device(engine_device_id)
     })
     .await?;
+    if !applied {
+        emit_status(&app, &h);
+        return Ok(());
+    }
+
+    update_config(&h, |cfg| {
+        cfg.audio.source_mic_id = Some(device_id);
+    })?;
+    h.state.lock().unwrap().status.source_mic_name = Some(source_name);
     emit_status(&app, &h);
     Ok(())
 }
@@ -395,7 +560,7 @@ pub fn set_mix_settings(
 
 #[tauri::command]
 pub async fn install_virtual_mic(h: tauri::State<'_, AppHandle>) -> Result<(), AppError> {
-    crate::driver_status::install().map_err(AppError::internal)?;
+    run_driver_control("install virtual microphone", crate::driver_status::install).await?;
     let devices = enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
     // Re-check driver state after the privileged install.
     match set_driver_state_from_devices(&h, &devices) {
@@ -407,7 +572,7 @@ pub async fn install_virtual_mic(h: tauri::State<'_, AppHandle>) -> Result<(), A
 #[tauri::command]
 pub async fn update_virtual_mic(h: tauri::State<'_, AppHandle>) -> Result<(), AppError> {
     // "Update" == reinstall the bundled driver.
-    crate::driver_status::install().map_err(AppError::internal)?;
+    run_driver_control("update virtual microphone", crate::driver_status::install).await?;
     let devices = enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
     match set_driver_state_from_devices(&h, &devices) {
         DriverState::Healthy => Ok(()),
@@ -416,8 +581,12 @@ pub async fn update_virtual_mic(h: tauri::State<'_, AppHandle>) -> Result<(), Ap
 }
 
 #[tauri::command]
-pub fn uninstall_virtual_mic(h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    crate::driver_status::uninstall().map_err(AppError::internal)?;
+pub async fn uninstall_virtual_mic(h: tauri::State<'_, AppHandle>) -> Result<(), AppError> {
+    run_driver_control(
+        "uninstall virtual microphone",
+        crate::driver_status::uninstall,
+    )
+    .await?;
     *h.driver_state.lock().unwrap() = DriverState::Missing;
     h.state.lock().unwrap().status.virtual_mic_installed = false;
     Ok(())
@@ -513,13 +682,15 @@ pub fn stop_mic_level_probe(
 /// the transcripts directory, then emits `"transcript-cleared"` so the
 /// frontend store zeroes `srcText`/`tgtText`. Returns the number of files deleted.
 #[tauri::command]
-pub fn clear_transcript_history(
+pub async fn clear_transcript_history(
     app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<usize, AppError> {
     use tauri::Emitter;
     engine.end_session_log();
-    let n = crate::transcript_log::clear_all();
+    let n = tauri::async_runtime::spawn_blocking(crate::transcript_log::clear_all)
+        .await
+        .map_err(|e| AppError::internal(format!("clear transcript history task failed: {e}")))?;
     let _ = app.emit("transcript-cleared", ());
     Ok(n)
 }
@@ -579,7 +750,8 @@ fn account_status(account: &AccountConfig) -> AccountStatus {
 
 #[tauri::command]
 pub fn get_account_status(h: tauri::State<AppHandle>) -> Result<AccountStatus, AppError> {
-    Ok(account_status(&h.config.lock().unwrap().account))
+    let account = h.config.lock().unwrap().account.clone();
+    Ok(account_status(&account))
 }
 
 #[tauri::command]
@@ -1004,6 +1176,11 @@ pub fn open_captions_window(
 #[tauri::command]
 pub fn close_captions_window(app: tauri::AppHandle) -> Result<(), AppError> {
     do_close_captions_window(&app)
+}
+
+#[tauri::command]
+pub fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 // ── Connection log / UI config / external URL ────────────────────────────────

@@ -7,11 +7,26 @@ mod engine;
 mod permission;
 mod platform_integration;
 mod shortcuts;
+mod single_instance;
 mod transcript_log;
 mod usage_store;
 
 use commands::AppHandle;
 use serde::Serialize;
+
+fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.show();
+    }
+
+    use tauri::Manager as _;
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,8 +349,20 @@ fn probe_api_key(api_key_file: Option<&str>) -> (bool, bool, bool, String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let single_instance_guard = match crate::single_instance::acquire() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("[intervox:lifecycle] another Intervox instance is already running: {error}");
+            if let crate::single_instance::SingleInstanceError::AlreadyRunning { pid, .. } = error {
+                crate::single_instance::activate_existing(pid);
+            }
+            return;
+        }
+    };
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(single_instance_guard)
         .manage(AppHandle::hydrated())
         .setup(|app| {
             use tauri::Manager as _;
@@ -432,7 +459,7 @@ pub fn run() {
                 .menu(&menu)
                 .tooltip(format!("Intervox — {initial_title}"))
                 .title(initial_title)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
                     use intervox_core::state::VirtualMicMode;
                     use tauri::Manager;
@@ -455,10 +482,7 @@ pub fn run() {
 
                         // ── Show Window ─────────────────────────────────────
                         "show_window" => {
-                            if let Some(win) = app.get_webview_window("main") {
-                                let _ = win.show();
-                                let _ = win.set_focus();
-                            }
+                            show_main_window(app);
                         }
 
                         // ── Captions ─────────────────────────────────────────
@@ -552,8 +576,10 @@ pub fn run() {
             commands::get_app_status,
             commands::set_virtual_mic_mode,
             commands::get_audio_devices,
-            commands::get_audio_levels,
             commands::get_audio_backpressure_metrics,
+            commands::get_audio_meter_diagnostics,
+            commands::record_frontend_meter_diagnostics,
+            commands::record_frontend_lifecycle_diagnostics,
             commands::set_source_mic,
             commands::set_monitor_output,
             commands::set_target_language,
@@ -583,6 +609,7 @@ pub fn run() {
             commands::complete_onboarding,
             commands::open_captions_window,
             commands::close_captions_window,
+            commands::quit_app,
             commands::open_accessibility_settings,
             commands::get_connection_log,
             commands::set_ui_config,
@@ -611,6 +638,11 @@ pub fn run() {
                 if let Some(win) = app_handle.get_webview_window("main") {
                     let _ = win.hide();
                 }
+            }
+
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                show_main_window(app_handle);
             }
 
             // ── Exit / ExitRequested → flush ring silence via shutdown ────────

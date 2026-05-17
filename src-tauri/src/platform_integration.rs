@@ -16,7 +16,9 @@ fn write_login_item(enable: bool) {
         let _ = std::fs::remove_file(&p);
         return;
     }
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
     // Prefer launching the .app bundle via LaunchServices so the bundle/
     // NSApplication lifecycle (dock, activation policy) initializes correctly.
     let app_bundle = exe
@@ -84,6 +86,9 @@ mod tests {
     fn tray_title_appends_badge_only_when_enabled_and_present() {
         assert_eq!(tray_title("Translate", false, Some(1200)), "Translate");
         assert_eq!(tray_title("Translate", true, None), "Translate");
-        assert_eq!(tray_title("Translate", true, Some(1180)), "Translate · 1.2s");
+        assert_eq!(
+            tray_title("Translate", true, Some(1180)),
+            "Translate · 1.2s"
+        );
     }
 }

@@ -34,7 +34,7 @@
 //! The queue is `None` at 0%, and `Some(queue)` when original voice should be
 //! mixed underneath the translation. The pull task drains 480 samples per tick.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use intervox_core::audio::level_meter::LevelMeter;
@@ -104,6 +104,8 @@ pub(super) struct RouteFrameContext<'a> {
     pub ring: &'a RingProducer,
     /// Shared output RMS (written in PassThrough; cleared otherwise).
     pub out_level: &'a AtomicU32,
+    /// Monotonic freshness counter for actual virtual-mic output writes.
+    pub output_sequence: &'a AtomicU64,
     /// Shared slot for the OpenAI uplink `Sender`.
     pub uplink_slot: &'a UplinkSlot,
     /// Persistent streaming resampler (48 kHz → 24 kHz).
@@ -132,6 +134,7 @@ pub(super) fn route_frame(mode: VirtualMicMode, frame: &[f32], ctx: RouteFrameCo
         ctx.ring.write_live(frame);
         let level = LevelMeter::measure(frame);
         ctx.out_level.store(level.rms.to_bits(), Ordering::Relaxed);
+        ctx.output_sequence.fetch_add(1, Ordering::Release);
         false
     } else if routing.mic_to_openai {
         // Translate: do NOT leak raw mic to ring.
@@ -192,7 +195,7 @@ pub(super) fn route_frame(mode: VirtualMicMode, frame: &[f32], ctx: RouteFrameCo
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::Arc;
 
     use crate::engine::translate_chain;
@@ -252,6 +255,7 @@ mod tests {
         frame: &[f32],
         ring: &TestRingProducer,
         out_level: &AtomicU32,
+        output_sequence: &AtomicU64,
         uplink_slot: &TestUplinkSlot,
         resampler: &mut LinearResampler,
         uplink_chunker: &mut super::OpenAiChunker,
@@ -268,6 +272,7 @@ mod tests {
             ring.write(frame);
             let level = LevelMeter::measure(frame);
             out_level.store(level.rms.to_bits(), Ordering::Relaxed);
+            output_sequence.fetch_add(1, Ordering::Release);
             false
         } else if routing.mic_to_openai {
             let maybe_tx = uplink_slot.lock().clone();
@@ -345,6 +350,7 @@ mod tests {
     fn passthrough_writes_to_ring_and_sets_out_level() {
         let ring = TestRingProducer::new();
         let out_level = AtomicU32::new(0);
+        let output_sequence = AtomicU64::new(0);
         let frame = nonzero_frame();
         let mut resampler = LinearResampler::new(48_000, 24_000);
         let mut chunker = super::OpenAiChunker::new();
@@ -354,6 +360,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &output_sequence,
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
@@ -365,6 +372,11 @@ mod tests {
         assert!(
             rms > 0.0,
             "PassThrough must produce non-zero out_level, got {rms}"
+        );
+        assert_eq!(
+            output_sequence.load(Ordering::Relaxed),
+            1,
+            "PassThrough must advance output meter freshness"
         );
     }
 
@@ -381,6 +393,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
@@ -409,6 +422,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
@@ -439,6 +453,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
@@ -463,6 +478,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
@@ -496,6 +512,7 @@ mod tests {
                 &frame,
                 &ring,
                 &out_level,
+                &AtomicU64::new(0),
                 &uplink,
                 &mut resampler,
                 &mut chunker,
@@ -538,6 +555,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
@@ -570,6 +588,7 @@ mod tests {
             super::RouteFrameContext {
                 ring,
                 out_level,
+                output_sequence: &AtomicU64::new(0),
                 uplink_slot: uplink,
                 resampler,
                 uplink_chunker: &mut chunker,
@@ -597,6 +616,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &uplink,
             &mut resampler,
             &mut chunker,
@@ -628,6 +648,7 @@ mod tests {
             &frame,
             &ring,
             &out_level,
+            &AtomicU64::new(0),
             &empty_uplink(),
             &mut resampler,
             &mut chunker,

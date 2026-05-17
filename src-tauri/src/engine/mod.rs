@@ -1,7 +1,7 @@
-//! Live audio engine: mode control, CPAL mic capture, and input-level events.
+//! Live audio engine: mode control, CPAL mic capture, and backend-pushed meter events.
 //!
 //! `Engine` owns the ring producer, the optional `CaptureHandle`, and the
-//! optional level-emit task.  It is `Send + Sync` because:
+//! optional meter task.  It is `Send + Sync` because:
 //! - `Mutex<Inner>` is `Send + Sync` (all `Inner` fields are `Send`),
 //! - `Arc<RingProducer>` is `Send + Sync`,
 //! - `tauri::AppHandle` is `Send + Sync`.
@@ -40,7 +40,7 @@ use intervox_core::{
 use parking_lot::Mutex;
 use tauri::Emitter;
 
-use capture::CaptureHandle;
+use capture::{CaptureHandle, CapturedFrame};
 use ring::{mode_to_ring_u32, RingProducer};
 use translate_chain::{SharedOriginalQueue, OPENAI_UPLINK_QUEUE_BOUND};
 
@@ -68,6 +68,16 @@ type SharedJitterBuf = Arc<Mutex<JitterBuffer>>;
 /// of the `Option<Sender>` which is a few nanoseconds.
 type UplinkSlot = Arc<Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>>>;
 
+const METER_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+const METER_STALE_TICKS: u8 = 4;
+const MAIN_WEBVIEW_LABEL: &str = "main";
+
+fn lifecycle_trace(message: impl AsRef<str>) {
+    if std::env::var_os("INTERVOX_LIFECYCLE_TRACE").is_some() {
+        eprintln!("[intervox:lifecycle] {}", message.as_ref());
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct AudioBackpressureCounters {
     capture_pool_misses: AtomicU64,
@@ -89,6 +99,65 @@ pub struct AudioBackpressureMetrics {
     pub uplink_chunks_sent: u64,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterFrame {
+    pub sequence: u64,
+    pub input_level: f32,
+    pub output_level: f32,
+    pub input_active: bool,
+    pub output_active: bool,
+    pub input_sequence: u64,
+    pub output_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioMeterFrameSignature {
+    input_level_bits: u32,
+    output_level_bits: u32,
+    input_active: bool,
+    output_active: bool,
+    input_sequence: u64,
+    output_sequence: u64,
+}
+
+impl From<&AudioMeterFrame> for AudioMeterFrameSignature {
+    fn from(frame: &AudioMeterFrame) -> Self {
+        Self {
+            input_level_bits: frame.input_level.to_bits(),
+            output_level_bits: frame.output_level.to_bits(),
+            input_active: frame.input_active,
+            output_active: frame.output_active,
+            input_sequence: frame.input_sequence,
+            output_sequence: frame.output_sequence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterDiagnostics {
+    pub input_level: f32,
+    pub output_level: f32,
+    pub input_sequence: u64,
+    pub output_sequence: u64,
+    pub last_frame_sequence: u64,
+    pub emit_attempts: u64,
+    pub emit_failures: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MeterChannelFreshness {
+    last_sequence: u64,
+    stale_ticks: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MeterChannelSample {
+    level: f32,
+    active: bool,
+}
+
 impl AudioBackpressureCounters {
     pub(crate) fn capture_pool_miss(&self) {
         self.capture_pool_misses.fetch_add(1, Ordering::Relaxed);
@@ -103,8 +172,7 @@ impl AudioBackpressureCounters {
     }
 
     pub(crate) fn uplink_no_session_drop(&self) {
-        self.uplink_no_session_drops
-            .fetch_add(1, Ordering::Relaxed);
+        self.uplink_no_session_drops.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn uplink_queue_drop(&self) {
@@ -127,19 +195,43 @@ impl AudioBackpressureCounters {
     }
 }
 
+impl MeterChannelFreshness {
+    fn sample(&mut self, raw_level: f32, sequence: u64) -> MeterChannelSample {
+        if sequence != self.last_sequence {
+            self.last_sequence = sequence;
+            self.stale_ticks = 0;
+            return MeterChannelSample {
+                level: raw_level,
+                active: true,
+            };
+        }
+
+        self.stale_ticks = self.stale_ticks.saturating_add(1);
+        let active = sequence != 0 && self.stale_ticks <= METER_STALE_TICKS;
+        MeterChannelSample {
+            level: if active { raw_level } else { 0.0 },
+            active,
+        }
+    }
+}
+
 // ── Inner state ───────────────────────────────────────────────────────────────
 
 struct Inner {
     mode: VirtualMicMode,
     source_device_id: Option<String>,
+    /// Monotonic token for source-device switches. A slow CoreAudio open from
+    /// an older selection must not overwrite a newer user selection.
+    source_switch_generation: u64,
     target_language: String,
     /// The running capture thread handle.  `None` when capture is stopped.
     capture: Option<CaptureHandle>,
-    /// Tokio task that emits `"input-level"` and `"output-level"` events ~20 Hz.
-    level_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Graph task that reads captured frames from the channel and routes them
     /// (PassThrough → ring write; Translate → 40 ms PCM16 chunks → OpenAI uplink).
     graph_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Stop flag for the blocking graph receiver loop. Aborting the Tokio task
+    /// does not cancel `spawn_blocking`, so the loop needs its own stop signal.
+    graph_stop: Option<Arc<AtomicBool>>,
     /// OpenAI Realtime websocket transport task (Task 4.1).
     realtime_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Real downlink event consumer (Task 4.2): routes audio to jitter buffer
@@ -155,10 +247,13 @@ struct Inner {
     /// needs capture and triggers one automatic restart (cap-1 per mode-entry).
     capture_watcher_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Onboarding/source-selection probe. This opens the selected input device
-    /// only to measure RMS and emit `"input-level"` while the live engine stays
-    /// in Silence. It never writes to the virtual mic ring or OpenAI.
+    /// only to measure RMS while the live engine stays in Silence. It never
+    /// writes to the virtual mic ring or OpenAI.
     probe_capture: Option<CaptureHandle>,
-    probe_level_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Engine-level meter emitter. It is intentionally independent from capture
+    /// and probe lifetimes so frontend meter events keep flowing across mode
+    /// changes, capture restarts, and source-selection probes.
+    meter_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Task 7: 10 s housekeeping ticker that folds uplink-sample deltas into the
     /// persisted UsageStore.  Stored so `shutdown()` can abort it before the
     /// final synchronous fold, preventing a double-write race.
@@ -172,11 +267,24 @@ pub struct Engine {
     inner: Mutex<Inner>,
     ring: Arc<RingProducer>,
     app: tauri::AppHandle,
-    /// Shared RMS level written by the capture callback, read by the level task.
+    /// Shared RMS level written by the capture callback, read by the meter task.
     level: Arc<AtomicU32>,
     /// Shared output RMS level written by the graph loop (PassThrough path),
-    /// emitted as `"output-level"` by the 20 Hz level task.
+    /// read by the engine-level meter task.
     out_level: Arc<AtomicU32>,
+    /// Monotonic input-meter freshness counter. Incremented by the capture
+    /// callback before downstream graph buffering so UI liveness does not
+    /// depend on the graph accepting frames.
+    input_level_sequence: Arc<AtomicU64>,
+    /// Monotonic output-meter freshness counter. Incremented by actual virtual
+    /// mic output writers (PassThrough graph path and translation pull task).
+    output_level_sequence: Arc<AtomicU64>,
+    /// Last backend meter frame sequence emitted through Tauri's event bus.
+    meter_frame_sequence: Arc<AtomicU64>,
+    /// Number of meter frame send attempts made by the backend.
+    meter_emit_attempts: Arc<AtomicU64>,
+    /// Number of failed meter frame send attempts returned by Tauri.
+    meter_emit_failures: Arc<AtomicU64>,
     /// Current mode stored as a `u32` for lock-free reads from the graph loop.
     /// Updated at the TOP of `set_mode` before any capture restart.
     mode_atomic: Arc<AtomicU32>,
@@ -262,17 +370,18 @@ impl Engine {
         let mut inner = Inner {
             mode: VirtualMicMode::Silence,
             source_device_id: cfg.audio.source_mic_id.clone(),
+            source_switch_generation: 0,
             target_language: cfg.translation.target_language.clone(),
             capture: None,
-            level_task: None,
             graph_task: None,
+            graph_stop: None,
             realtime_task: None,
             ev_task: None,
             pull_task: None,
             pcm_tx: None,
             capture_watcher_task: None,
             probe_capture: None,
-            probe_level_task: None,
+            meter_task: None,
             fold_task: None,
         };
 
@@ -284,6 +393,107 @@ impl Engine {
         // the struct fields and the 10 s housekeeping task (Task 7).
         let uplink_samples_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let uplink_persisted_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let level_arc: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let out_level_arc: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let input_level_sequence_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let output_level_sequence_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let meter_frame_sequence_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let meter_emit_attempts_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let meter_emit_failures_arc: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let backpressure_arc: Arc<AudioBackpressureCounters> =
+            Arc::new(AudioBackpressureCounters::default());
+
+        // Meter events are Engine-level, not capture-level. Capture/probe tasks
+        // update atomics plus freshness sequences; this task owns the frontend
+        // event stream for the whole app lifetime. The frontend receives one
+        // coherent frame per changed backend snapshot, never paired input/output
+        // events that can race or get half-updated.
+        {
+            let level = Arc::clone(&level_arc);
+            let out_level = Arc::clone(&out_level_arc);
+            let input_level_sequence = Arc::clone(&input_level_sequence_arc);
+            let output_level_sequence = Arc::clone(&output_level_sequence_arc);
+            let meter_frame_sequence = Arc::clone(&meter_frame_sequence_arc);
+            let meter_emit_attempts = Arc::clone(&meter_emit_attempts_arc);
+            let meter_emit_failures = Arc::clone(&meter_emit_failures_arc);
+            let backpressure = Arc::clone(&backpressure_arc);
+            let app = app.clone();
+            let meter_trace = std::env::var_os("INTERVOX_METER_TRACE").is_some();
+            let meter_handle = tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(METER_TICK);
+                let mut backpressure_tick = 0_u8;
+                let mut sequence = 0_u64;
+                let mut last_signature: Option<AudioMeterFrameSignature> = None;
+                let mut input_freshness = MeterChannelFreshness::default();
+                let mut output_freshness = MeterChannelFreshness::default();
+                loop {
+                    tick.tick().await;
+
+                    let input_sequence = input_level_sequence.load(Ordering::Acquire);
+                    let output_sequence = output_level_sequence.load(Ordering::Acquire);
+                    let input_sample = input_freshness.sample(
+                        f32::from_bits(level.load(Ordering::Relaxed)),
+                        input_sequence,
+                    );
+                    let output_sample = output_freshness.sample(
+                        f32::from_bits(out_level.load(Ordering::Relaxed)),
+                        output_sequence,
+                    );
+
+                    let mut frame = AudioMeterFrame {
+                        sequence: sequence.wrapping_add(1),
+                        input_level: input_sample.level,
+                        output_level: output_sample.level,
+                        input_active: input_sample.active,
+                        output_active: output_sample.active,
+                        input_sequence,
+                        output_sequence,
+                    };
+
+                    let signature = AudioMeterFrameSignature::from(&frame);
+                    let active_transition = last_signature.is_some_and(|previous| {
+                        previous.input_active != frame.input_active
+                            || previous.output_active != frame.output_active
+                    });
+                    let changed = last_signature != Some(signature);
+
+                    if changed {
+                        sequence = sequence.wrapping_add(1);
+                        frame.sequence = sequence;
+                        last_signature = Some(signature);
+                        meter_frame_sequence.store(sequence, Ordering::Release);
+                        meter_emit_attempts.fetch_add(1, Ordering::Relaxed);
+                        if app
+                            .emit_to(MAIN_WEBVIEW_LABEL, "audio-meter", frame)
+                            .is_err()
+                        {
+                            meter_emit_failures.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if meter_trace && (active_transition || sequence.is_multiple_of(20)) {
+                            eprintln!(
+                                "[intervox:meter:backend] frame={} input_seq={} output_seq={} input={:.6} output={:.6} input_active={} output_active={} emit_attempts={} emit_failures={}",
+                                frame.sequence,
+                                frame.input_sequence,
+                                frame.output_sequence,
+                                frame.input_level,
+                                frame.output_level,
+                                frame.input_active,
+                                frame.output_active,
+                                meter_emit_attempts.load(Ordering::Relaxed),
+                                meter_emit_failures.load(Ordering::Relaxed),
+                            );
+                        }
+                    }
+
+                    backpressure_tick = backpressure_tick.saturating_add(1);
+                    if backpressure_tick >= 20 {
+                        backpressure_tick = 0;
+                        let _ = app.emit("audio-backpressure", backpressure.snapshot());
+                    }
+                }
+            });
+            inner.meter_task = Some(meter_handle);
+        }
 
         // Usage fold: every 10 s, move the uplink sample delta into the
         // persisted UsageStore. uplink_persisted tracks the last-folded count.
@@ -313,12 +523,17 @@ impl Engine {
             inner: Mutex::new(inner),
             ring,
             app,
-            level: Arc::new(AtomicU32::new(0)),
-            out_level: Arc::new(AtomicU32::new(0)),
+            level: level_arc,
+            out_level: out_level_arc,
+            input_level_sequence: input_level_sequence_arc,
+            output_level_sequence: output_level_sequence_arc,
+            meter_frame_sequence: meter_frame_sequence_arc,
+            meter_emit_attempts: meter_emit_attempts_arc,
+            meter_emit_failures: meter_emit_failures_arc,
             mode_atomic: Arc::new(AtomicU32::new(mode_to_ring_u32(VirtualMicMode::Silence))),
             uplink_slot: Arc::new(Mutex::new(None)),
             original_queue_slot: Arc::new(Mutex::new(None)),
-            backpressure: Arc::new(AudioBackpressureCounters::default()),
+            backpressure: backpressure_arc,
             last_send_time: Arc::new(Mutex::new(None)),
             audio_flowing: Arc::new(AtomicBool::new(false)),
             session_active: Arc::new(AtomicBool::new(false)),
@@ -360,6 +575,8 @@ impl Engine {
     /// 7. Starts or stops the OpenAI Realtime session based on
     ///    `routing.openai_connected`.
     pub fn set_mode(&self, mode: VirtualMicMode) {
+        let started = std::time::Instant::now();
+        lifecycle_trace(format!("engine.set_mode start mode={mode:?}"));
         // Update the atomic FIRST so the graph loop sees the new mode on the
         // next frame even before the inner lock is acquired.
         self.mode_atomic
@@ -369,6 +586,12 @@ impl Engine {
             let mut g = self.inner.lock();
             let previous = g.mode;
             g.mode = mode;
+            lifecycle_trace(format!(
+                "engine.set_mode state_updated previous={previous:?} next={mode:?} capture={} probe={} realtime={}",
+                g.capture.is_some(),
+                g.probe_capture.is_some(),
+                g.realtime_task.is_some()
+            ));
             previous
         };
 
@@ -378,11 +601,10 @@ impl Engine {
 
         if routing.ring_silence {
             self.ring.flush_silence();
-            // Honest idle: reset both level atomics to 0 when entering Silence.
-            self.level.store(0, Ordering::Relaxed);
-            self.out_level.store(0, Ordering::Relaxed);
-            let _ = self.app.emit("input-level", 0.0f32);
-            let _ = self.app.emit("output-level", 0.0f32);
+            // Honest idle: reset both level atomics; the meter task pushes the
+            // coherent zero frame on its next tick.
+            self.publish_input_level_zero();
+            self.publish_output_level_zero();
         } else if mode != previous_mode {
             // Entering a live mode must start from current audio, not unread
             // samples left behind by a previous mode or by an inactive consumer.
@@ -391,28 +613,92 @@ impl Engine {
 
         let needs_capture = routing.mic_to_ring || routing.mic_to_openai;
 
+        let capture_start_device: Option<Option<String>> = {
+            let mut g = self.inner.lock();
+            if needs_capture && g.capture.is_none() {
+                lifecycle_trace(format!(
+                    "engine.set_mode scheduling_capture mode={mode:?} source={:?}",
+                    g.source_device_id
+                ));
+                self.stop_level_probe_locked(&mut g);
+                // Allow exactly one auto-restart per mode-entry (Task 4.5).
+                self.capture_restart_allowed.store(true, Ordering::Relaxed);
+                Some(g.source_device_id.clone())
+            } else if !needs_capture && g.capture.is_some() {
+                lifecycle_trace(format!("engine.set_mode stopping_capture mode={mode:?}"));
+                // No auto-restart when capture is intentionally stopped.
+                self.capture_restart_allowed.store(false, Ordering::Relaxed);
+                self.stop_capture_locked(&mut g);
+                None
+            } else {
+                None
+            }
+        };
+
+        if let Some(device_id) = capture_start_device {
+            let opened =
+                self.open_capture_for_device(device_id.clone(), Arc::clone(&self.backpressure));
+            match opened {
+                Ok((handle, rx)) => {
+                    let mut g = self.inner.lock();
+                    let current_routing = intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
+                    let current_needs_capture =
+                        current_routing.mic_to_ring || current_routing.mic_to_openai;
+                    if current_needs_capture
+                        && g.capture.is_none()
+                        && g.source_device_id == device_id
+                    {
+                        self.install_capture_locked(&mut g, handle, rx);
+                        lifecycle_trace(format!(
+                            "engine.set_mode installed_capture mode={:?} source={:?}",
+                            g.mode, g.source_device_id
+                        ));
+                    } else {
+                        lifecycle_trace(format!(
+                            "engine.set_mode discarding_stale_capture current_mode={:?} requested_source={device_id:?} current_source={:?}",
+                            g.mode, g.source_device_id
+                        ));
+                        drop(g);
+                        handle.stop_in_background("stale-mode-capture");
+                        drop(rx);
+                    }
+                }
+                Err(e) => {
+                    let should_surface = {
+                        let g = self.inner.lock();
+                        let current_routing =
+                            intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
+                        let current_needs_capture =
+                            current_routing.mic_to_ring || current_routing.mic_to_openai;
+                        current_needs_capture
+                            && g.capture.is_none()
+                            && g.source_device_id == device_id
+                    };
+                    if should_surface {
+                        eprintln!("[engine] failed to start capture: {e}");
+                        let _ = self.app.emit("error", e);
+                    } else {
+                        lifecycle_trace(format!(
+                            "engine.set_mode ignored_stale_capture_error requested_source={device_id:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
         // Capture the target language and whether a new session is being started
         // before releasing the guard, so we can push "connecting" post-lock (Task 9).
         let connecting_tgt: Option<String> = {
             let mut g = self.inner.lock();
-            if needs_capture && g.capture.is_none() {
-                self.stop_level_probe_locked(&mut g);
-                // Allow exactly one auto-restart per mode-entry (Task 4.5).
-                self.capture_restart_allowed.store(true, Ordering::Relaxed);
-                self.start_capture_locked(&mut g);
-            } else if !needs_capture && g.capture.is_some() {
-                // No auto-restart when capture is intentionally stopped.
-                self.capture_restart_allowed.store(false, Ordering::Relaxed);
-                self.stop_capture_locked(&mut g);
-            }
+            let current_routing = intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
 
             // ── OpenAI Realtime session lifecycle ─────────────────────────────────
-            if routing.openai_connected && g.realtime_task.is_none() {
+            if current_routing.openai_connected && g.realtime_task.is_none() {
                 let tgt = g.target_language.clone();
                 self.start_openai_session_locked(&mut g);
                 Some(tgt)
             } else {
-                if !routing.openai_connected && g.realtime_task.is_some() {
+                if !current_routing.openai_connected && g.realtime_task.is_some() {
                     self.stop_openai_session_locked(&mut g);
                 }
                 None
@@ -424,23 +710,109 @@ impl Engine {
         if let Some(tgt) = connecting_tgt {
             self.conn_log.push("connecting", format!("target={tgt}"));
         }
+        lifecycle_trace(format!(
+            "engine.set_mode done mode={mode:?} elapsed_ms={}",
+            started.elapsed().as_millis()
+        ));
     }
 
     // ── Device / language setters ─────────────────────────────────────────────
 
     /// Store the selected source-mic device ID and restart capture if running.
-    pub fn set_source_device(&self, id: String) {
+    ///
+    /// Source switching is a transaction:
+    /// - validate the CoreAudio UID before mutating engine state;
+    /// - if a stream is active, open the new stream before stopping the old one;
+    /// - install only if this switch generation is still current;
+    /// - on open failure, keep the old source and old stream alive.
+    ///
+    /// Returns `false` when this request was superseded by a newer source switch.
+    pub fn set_source_device(&self, id: String) -> Result<bool, AppError> {
+        if crate::devices::resolve_input_device_id(&id).is_none() {
+            return Err(AppError::audio_device_unavailable(
+                "The selected microphone is not visible to CoreAudio.",
+            ));
+        }
+
+        let (generation, use_live_backpressure) = {
+            let mut g = self.inner.lock();
+            if g.source_device_id.as_deref() == Some(id.as_str()) {
+                return Ok(true);
+            }
+
+            g.source_switch_generation = g.source_switch_generation.wrapping_add(1);
+            let generation = g.source_switch_generation;
+            let capture_active = g.capture.is_some();
+            let has_running_stream = capture_active || g.probe_capture.is_some();
+
+            if !has_running_stream {
+                g.source_device_id = Some(id);
+                return Ok(true);
+            }
+
+            (generation, capture_active)
+        };
+
+        let backpressure = if use_live_backpressure {
+            Arc::clone(&self.backpressure)
+        } else {
+            Arc::new(AudioBackpressureCounters::default())
+        };
+        let opened = match self.open_capture_for_device(Some(id.clone()), backpressure) {
+            Ok(opened) => opened,
+            Err(e) => {
+                let mut g = self.inner.lock();
+                if g.source_switch_generation != generation {
+                    return Ok(false);
+                }
+
+                let routing = intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
+                let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
+                let stream_still_required = mode_needs_capture || g.probe_capture.is_some();
+                if stream_still_required {
+                    return Err(e);
+                }
+
+                g.source_device_id = Some(id);
+                return Ok(true);
+            }
+        };
+
+        let (handle, rx) = opened;
         let mut g = self.inner.lock();
+        if g.source_switch_generation != generation {
+            drop(g);
+            handle.stop_in_background("superseded-source-capture");
+            drop(rx);
+            return Ok(false);
+        }
+
         g.source_device_id = Some(id);
-        // Restart capture with the new device if it is currently running.
-        if g.capture.is_some() {
-            self.stop_capture_locked(&mut g);
-            self.start_capture_locked(&mut g);
-        }
-        if g.probe_capture.is_some() {
+        let routing = intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
+        let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
+
+        if mode_needs_capture {
+            if g.probe_capture.is_some() {
+                self.stop_level_probe_locked(&mut g);
+            }
+            if g.capture.is_some() {
+                self.stop_capture_locked(&mut g);
+            }
+            self.install_capture_locked(&mut g, handle, rx);
+        } else if g.probe_capture.is_some() {
+            if g.capture.is_some() {
+                self.stop_capture_locked(&mut g);
+            }
             self.stop_level_probe_locked(&mut g);
-            let _ = self.start_level_probe_locked(&mut g);
+            drop(rx);
+            g.probe_capture = Some(handle);
+        } else {
+            drop(g);
+            handle.stop_in_background("inactive-source-capture");
+            drop(rx);
         }
+
+        Ok(true)
     }
 
     /// Store the target output language code.
@@ -500,10 +872,13 @@ impl Engine {
 
     // ── Shutdown ──────────────────────────────────────────────────────────────
 
-    /// Graceful shutdown: stop capture + level task, OpenAI session, then flush silence.
+    /// Graceful shutdown: stop capture + meter task, OpenAI session, then flush silence.
     pub fn shutdown(&self) {
         {
             let mut g = self.inner.lock();
+            if let Some(h) = g.meter_task.take() {
+                h.abort();
+            }
             self.stop_openai_session_locked(&mut g);
             self.stop_capture_locked(&mut g);
             self.stop_level_probe_locked(&mut g);
@@ -542,8 +917,28 @@ impl Engine {
     /// onboarding the app is still in Silence mode, but the user must still see
     /// whether the selected source microphone is receiving audio.
     pub fn start_level_probe(&self) -> Result<(), AppError> {
+        let device_id = {
+            let g = self.inner.lock();
+            if g.capture.is_some() || g.probe_capture.is_some() {
+                return Ok(());
+            }
+            g.source_device_id.clone()
+        };
+
+        let (handle, rx) = self.open_capture_for_device(
+            device_id.clone(),
+            Arc::new(AudioBackpressureCounters::default()),
+        )?;
+        drop(rx);
+
         let mut g = self.inner.lock();
-        self.start_level_probe_locked(&mut g)
+        if g.capture.is_none() && g.probe_capture.is_none() && g.source_device_id == device_id {
+            g.probe_capture = Some(handle);
+        } else {
+            drop(g);
+            handle.stop_in_background("stale-probe-capture");
+        }
+        Ok(())
     }
 
     /// Stop the source-selection microphone level probe if it is running.
@@ -569,6 +964,18 @@ impl Engine {
 
     pub fn backpressure_metrics(&self) -> AudioBackpressureMetrics {
         self.backpressure.snapshot()
+    }
+
+    pub fn meter_diagnostics(&self) -> AudioMeterDiagnostics {
+        AudioMeterDiagnostics {
+            input_level: f32::from_bits(self.level.load(Ordering::Relaxed)),
+            output_level: f32::from_bits(self.out_level.load(Ordering::Relaxed)),
+            input_sequence: self.input_level_sequence.load(Ordering::Acquire),
+            output_sequence: self.output_level_sequence.load(Ordering::Acquire),
+            last_frame_sequence: self.meter_frame_sequence.load(Ordering::Acquire),
+            emit_attempts: self.meter_emit_attempts.load(Ordering::Relaxed),
+            emit_failures: self.meter_emit_failures.load(Ordering::Relaxed),
+        }
     }
 
     /// Shared handle to the ring producer (for the audio pipeline).
@@ -598,6 +1005,16 @@ impl Engine {
     }
 
     // ── Internal helpers (called with `inner` lock held) ──────────────────────
+
+    fn publish_input_level_zero(&self) {
+        self.level.store(0, Ordering::Relaxed);
+        self.input_level_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn publish_output_level_zero(&self) {
+        self.out_level.store(0, Ordering::Relaxed);
+        self.output_level_sequence.fetch_add(1, Ordering::Release);
+    }
 
     /// Start the OpenAI Realtime session.
     ///
@@ -689,9 +1106,9 @@ impl Engine {
             None
         };
 
-        // Task 8: start the per-session transcript log file.
-        // Called while holding the inner lock — no async, no await; just one
-        // synchronous create_dir_all + Mutex write (sub-microsecond path).
+        // Task 8: start the per-session transcript log path. This is lock-only:
+        // directory creation is deferred to append so session start performs no
+        // filesystem work while holding the engine lock.
         self.session_log.start(&crate::commands::rfc3339_now());
         let session_log_task = std::sync::Arc::clone(&self.session_log);
 
@@ -1030,6 +1447,7 @@ impl Engine {
         // is significant enough to warrant a session restart.
         let ring_arc = Arc::clone(&self.ring);
         let out_level_arc = Arc::clone(&self.out_level);
+        let output_level_sequence = Arc::clone(&self.output_level_sequence);
         let jitter_pull = Arc::clone(&jitter);
         // Task 4.4: signals for latency emit.
         let pull_app = self.app.clone();
@@ -1107,6 +1525,7 @@ impl Engine {
                 // Update out_level from the FINAL block (mixed or limited).
                 let bits = translate_chain::rms_bits(&final_block);
                 out_level_arc.store(bits, Ordering::Relaxed);
+                output_level_sequence.fetch_add(1, Ordering::Release);
 
                 // Task 4.4: emit "latency-changed" at ~1 Hz (every 100 ticks).
                 // Gate: only when connected AND audio has actually flowed.
@@ -1142,6 +1561,7 @@ impl Engine {
                             let mut st = app_handle.state.lock().unwrap();
                             st.status.latency_ms = Some(total);
                         } // MutexGuard dropped here — never held across await
+
                         // Task 9: push "latency" only when value changed materially (> 100 ms).
                         // This avoids log spam at ~1 Hz while still capturing meaningful shifts.
                         let should_log = match last_logged_latency {
@@ -1183,8 +1603,8 @@ impl Engine {
     ///
     /// Aborts the transport, event-consumer, and pull tasks, clears the uplink
     /// slot (so the graph loop silently drops further audio frames), drops the
-    /// sender, and emits honest-idle level events so the output VU meter returns
-    /// to zero.
+    /// sender, and resets the output meter so the next backend-pushed meter
+    /// frame returns the output VU meter to zero.
     ///
     /// Task 4.4: also resets `audio_flowing` / `last_send_time` / `latency_ms`,
     /// marks `openai_connected=false` in `AppStatus`, and emits `"status-changed"`.
@@ -1232,11 +1652,9 @@ impl Engine {
         }
         // Drop the sender — this closes the channel to the (already-aborted) task.
         g.pcm_tx = None;
-        // Honest idle: reset out_level to 0 and emit a final "output-level" 0.0
-        // so the UI VU meter returns to zero rather than sticking at the last
-        // translated-audio reading.
-        self.out_level.store(0, Ordering::Relaxed);
-        let _ = self.app.emit("output-level", 0.0f32);
+        // Honest idle: reset out_level to 0. The meter task owns the frontend
+        // event stream and will publish the zero frame on the next tick.
+        self.publish_output_level_zero();
 
         // Task 4.4: reset latency signals — no stale data carries into the
         // next session.
@@ -1261,260 +1679,269 @@ impl Engine {
         self.conn_log.push("closed", "session ended");
     }
 
-    /// Start CPAL capture and the associated level-emit + graph tasks.
-    ///
-    /// Caller must hold the `inner` mutex lock.
-    fn start_capture_locked(&self, g: &mut Inner) {
-        let device_id = g.source_device_id.as_deref().map(str::to_owned);
+    fn open_capture_for_device(
+        &self,
+        device_id: Option<String>,
+        backpressure: Arc<AudioBackpressureCounters>,
+    ) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<CapturedFrame>), AppError> {
+        let started = std::time::Instant::now();
+        lifecycle_trace(format!("capture.open start device_id={device_id:?}"));
         let level = Arc::clone(&self.level);
+        let input_level_sequence = Arc::clone(&self.input_level_sequence);
         let app = self.app.clone();
-        let backpressure = Arc::clone(&self.backpressure);
 
-        match capture::start(device_id.as_deref(), level, app, backpressure) {
-            Ok((handle, rx)) => {
-                g.capture = Some(handle);
-
-                // Spawn ~20 Hz level-emit task — emits BOTH input and output levels.
-                let level_arc = Arc::clone(&self.level);
-                let out_level_arc = Arc::clone(&self.out_level);
-                let level_backpressure = Arc::clone(&self.backpressure);
-                let level_app = self.app.clone();
-                let level_task = tauri::async_runtime::spawn(async move {
-                    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
-                    let mut backpressure_tick = 0_u8;
-                    loop {
-                        tick.tick().await;
-                        let in_rms = f32::from_bits(level_arc.load(Ordering::Relaxed));
-                        let out_rms = f32::from_bits(out_level_arc.load(Ordering::Relaxed));
-                        let _ = level_app.emit("input-level", in_rms);
-                        let _ = level_app.emit("output-level", out_rms);
-                        backpressure_tick = backpressure_tick.saturating_add(1);
-                        if backpressure_tick >= 20 {
-                            backpressure_tick = 0;
-                            let _ = level_app
-                                .emit("audio-backpressure", level_backpressure.snapshot());
-                        }
-                    }
-                });
-                g.level_task = Some(level_task);
-
-                // Spawn graph task — routes captured frames to ring / OpenAI.
-                //
-                // The blocking receiver loop runs inside `spawn_blocking` so we
-                // don't starve the Tokio runtime.  The loop owns:
-                //   - `rx`: the frame receiver from the CPAL capture thread.
-                //   - `ring_arc`: shared ring producer for PassThrough.
-                //   - `mode_atomic`: lock-free mode read on every frame.
-                //   - `out_level_arc`: written on PassThrough frames.
-                //   - `uplink_slot`: shared slot holding the uplink Sender (or
-                //     None).  The graph loop clones the Sender under the slot
-                //     lock on each frame — lock time is sub-microsecond.
-                let ring_arc = Arc::clone(&self.ring);
-                let mode_atomic = Arc::clone(&self.mode_atomic);
-                let out_level_arc = Arc::clone(&self.out_level);
-                let uplink_slot = Arc::clone(&self.uplink_slot);
-                let original_queue_slot = Arc::clone(&self.original_queue_slot);
-                let graph_backpressure = Arc::clone(&self.backpressure);
-                // Task 4.4: stamp the last-send time in the graph loop so
-                // ev_task can compute openai_first_audio_ms.
-                let graph_last_send = Arc::clone(&self.last_send_time);
-                let graph_task = tauri::async_runtime::spawn(async move {
-                    tokio::task::spawn_blocking(move || {
-                        // One resampler instance persisted across frames so the
-                        // phase state carries across chunk boundaries (streaming-safe).
-                        let mut resampler =
-                            intervox_core::audio::resampler::LinearResampler::new(48_000, 24_000);
-                        let mut uplink_chunker = graph::OpenAiChunker::new();
-
-                        while let Ok(frame) = rx.recv() {
-                            let mode = ring::mode_from_u32(mode_atomic.load(Ordering::Relaxed));
-                            // Read the current original-queue slot under the lock
-                            // (sub-microsecond: just clone the Arc option).
-                            let oq = original_queue_slot.lock().clone();
-                            let sent_to_openai = graph::route_frame(
-                                mode,
-                                &frame,
-                                graph::RouteFrameContext {
-                                    ring: &ring_arc,
-                                    out_level: &out_level_arc,
-                                    uplink_slot: &uplink_slot,
-                                    resampler: &mut resampler,
-                                    uplink_chunker: &mut uplink_chunker,
-                                    original_queue: oq.as_ref(),
-                                    backpressure: &graph_backpressure,
-                                },
-                            );
-                            // Task 4.4: stamp only after a fixed 40 ms OpenAI
-                            // chunk is successfully enqueued to the realtime
-                            // transport. Stamping every capture frame would
-                            // undercount the batching delay.
-                            // Lock time: sub-microsecond (just store an Instant).
-                            if sent_to_openai {
-                                *graph_last_send.lock() = Some(std::time::Instant::now());
-                            }
-                        }
-                    })
-                    .await
-                    .ok();
-                });
-                g.graph_task = Some(graph_task);
-
-                // ── Task 4.5: capture watcher — one-shot auto-restart ─────────
-                //
-                // Polls every 500 ms to detect graph_task completion (which
-                // happens when the capture thread's sender drops = device lost).
-                // On device loss: emits a retryable AppError::audio_device_lost,
-                // then — if `capture_restart_allowed` is still true — attempts
-                // ONE automatic restart using the default device.
-                //
-                // `capture_restart_allowed` is set to true on mode-entry
-                // (inside `set_mode`) and to false on the first auto-restart
-                // attempt, preventing infinite restart storms.
-                //
-                // The watcher accesses the engine via `app.state::<Arc<Engine>>`
-                // so it holds no direct Arc<Engine> reference — no circular Arc.
-                let watcher_app = self.app.clone();
-                let watcher_restart_allowed = Arc::clone(&self.capture_restart_allowed);
-                let watcher_mode_atomic = Arc::clone(&self.mode_atomic);
-                // The watcher needs a JoinHandle<()> to poll graph_task.is_finished().
-                // We give it a shared Arc<AtomicBool> "capture_exited" that the
-                // graph_task sets to true when the blocking recv loop exits.
-                // This avoids needing to share the JoinHandle (which is not Clone).
-                let capture_exited = Arc::new(AtomicBool::new(false));
-                let capture_exited_graph = Arc::clone(&capture_exited);
-
-                // Re-wrap the graph_task to set capture_exited when it completes.
-                // We need to take the just-stored graph_task out and wrap it.
-                let raw_graph_task = g.graph_task.take().expect("just set above");
-                let graph_task_wrapped = tauri::async_runtime::spawn(async move {
-                    raw_graph_task.await.ok();
-                    capture_exited_graph.store(true, Ordering::Release);
-                });
-                g.graph_task = Some(graph_task_wrapped);
-
-                let capture_watcher_task = tauri::async_runtime::spawn(async move {
-                    use tauri::Manager as _;
-
-                    // Poll until capture_exited is true (device lost / channel closed).
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-                        if capture_exited.load(Ordering::Acquire) {
-                            break;
-                        }
-                    }
-
-                    // Capture thread has exited.  Check if mode still needs capture.
-                    let current_mode =
-                        ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
-                    let routing = intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
-                    let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
-
-                    if !mode_needs_capture {
-                        // Mode no longer needs capture — not a crash, just mode change.
-                        return;
-                    }
-
-                    // Emit retryable error to the frontend.
-                    // The `RecoveryAction` points to `set_virtual_mic_mode` which
-                    // the user can invoke to re-enter the current mode and restart
-                    // capture.  `audio_device_lost_retryable()` carries this action.
-                    let _ = watcher_app.emit(
-                        "error",
-                        intervox_core::AppError::audio_device_lost_retryable(),
-                    );
-
-                    // Attempt ONE automatic restart if the allowance flag is still set.
-                    // Consume the flag atomically (compare_exchange false→true→false).
-                    let was_allowed = watcher_restart_allowed
-                        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok();
-
-                    if !was_allowed {
-                        // Auto-restart already used (or intentionally disabled) —
-                        // surface only; user must retry via the banner.
-                        return;
-                    }
-
-                    // Short delay before restarting to let the OS settle.
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-                    // Re-check mode after the delay.
-                    let current_mode =
-                        ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
-                    let routing = intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
-                    if !(routing.mic_to_ring || routing.mic_to_openai) {
-                        return;
-                    }
-
-                    // Perform the restart via the engine's state.
-                    if let Some(engine) = watcher_app.try_state::<std::sync::Arc<Engine>>() {
-                        let mut g = engine.inner.lock();
-                        // Only restart if capture is not already running
-                        // (a manual restart via set_mode may have beaten us).
-                        if g.capture.is_none() {
-                            engine.start_capture_locked(&mut g);
-                        }
-                    }
-                });
-                g.capture_watcher_task = Some(capture_watcher_task);
-            }
-            Err(e) => {
-                eprintln!("[engine] failed to start capture: {e}");
-                let app = self.app.clone();
-                let _ = app.emit("error", e);
-            }
+        let result = capture::start(
+            device_id.as_deref(),
+            level,
+            input_level_sequence,
+            app,
+            backpressure,
+        );
+        match &result {
+            Ok(_) => lifecycle_trace(format!(
+                "capture.open ok device_id={device_id:?} elapsed_ms={}",
+                started.elapsed().as_millis()
+            )),
+            Err(error) => lifecycle_trace(format!(
+                "capture.open error device_id={device_id:?} elapsed_ms={} error={}",
+                started.elapsed().as_millis(),
+                error
+            )),
         }
+        result
     }
 
-    /// Start a CPAL input stream that updates the shared input RMS level only.
-    /// The returned audio receiver is dropped immediately, so no audio can flow
-    /// to the ring or network from this path; the capture callback still updates
-    /// `self.level` before its non-blocking send attempt.
-    fn start_level_probe_locked(&self, g: &mut Inner) -> Result<(), AppError> {
-        if g.capture.is_some() || g.probe_capture.is_some() {
-            return Ok(());
-        }
+    /// Attach an already-open capture stream to the live graph.
+    ///
+    /// Caller must hold the `inner` mutex lock. This function must not perform
+    /// CoreAudio or filesystem I/O.
+    fn install_capture_locked(
+        &self,
+        g: &mut Inner,
+        handle: CaptureHandle,
+        rx: std::sync::mpsc::Receiver<CapturedFrame>,
+    ) {
+        g.capture = Some(handle);
+        let graph_stop = Arc::new(AtomicBool::new(false));
+        g.graph_stop = Some(Arc::clone(&graph_stop));
 
-        let device_id = g.source_device_id.as_deref().map(str::to_owned);
-        let level = Arc::clone(&self.level);
-        let app = self.app.clone();
-        let backpressure = Arc::new(AudioBackpressureCounters::default());
-        let (handle, rx) = capture::start(device_id.as_deref(), level, app, backpressure)?;
-        drop(rx);
-        g.probe_capture = Some(handle);
+        // Spawn graph task — routes captured frames to ring / OpenAI.
+        //
+        // The blocking receiver loop runs inside `spawn_blocking` so we
+        // don't starve the Tokio runtime.  The loop owns:
+        //   - `rx`: the frame receiver from the CPAL capture thread.
+        //   - `ring_arc`: shared ring producer for PassThrough.
+        //   - `mode_atomic`: lock-free mode read on every frame.
+        //   - `out_level_arc`: written on PassThrough frames.
+        //   - `uplink_slot`: shared slot holding the uplink Sender (or
+        //     None).  The graph loop clones the Sender under the slot
+        //     lock on each frame — lock time is sub-microsecond.
+        let ring_arc = Arc::clone(&self.ring);
+        let mode_atomic = Arc::clone(&self.mode_atomic);
+        let out_level_arc = Arc::clone(&self.out_level);
+        let output_level_sequence = Arc::clone(&self.output_level_sequence);
+        let uplink_slot = Arc::clone(&self.uplink_slot);
+        let original_queue_slot = Arc::clone(&self.original_queue_slot);
+        let graph_backpressure = Arc::clone(&self.backpressure);
+        // Task 4.4: stamp the last-send time in the graph loop so
+        // ev_task can compute openai_first_audio_ms.
+        let graph_last_send = Arc::clone(&self.last_send_time);
+        let graph_stop_loop = Arc::clone(&graph_stop);
+        let graph_task = tauri::async_runtime::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                // One resampler instance persisted across frames so the
+                // phase state carries across chunk boundaries (streaming-safe).
+                let mut resampler =
+                    intervox_core::audio::resampler::LinearResampler::new(48_000, 24_000);
+                let mut uplink_chunker = graph::OpenAiChunker::new();
 
-        let level_arc = Arc::clone(&self.level);
-        let level_app = self.app.clone();
-        let level_task = tauri::async_runtime::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+                while !graph_stop_loop.load(Ordering::Acquire) {
+                    let frame = match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                        Ok(frame) => frame,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                    let mode = ring::mode_from_u32(mode_atomic.load(Ordering::Relaxed));
+                    // Read the current original-queue slot under the lock
+                    // (sub-microsecond: just clone the Arc option).
+                    let oq = original_queue_slot.lock().clone();
+                    let sent_to_openai = graph::route_frame(
+                        mode,
+                        &frame,
+                        graph::RouteFrameContext {
+                            ring: &ring_arc,
+                            out_level: &out_level_arc,
+                            output_sequence: &output_level_sequence,
+                            uplink_slot: &uplink_slot,
+                            resampler: &mut resampler,
+                            uplink_chunker: &mut uplink_chunker,
+                            original_queue: oq.as_ref(),
+                            backpressure: &graph_backpressure,
+                        },
+                    );
+                    // Task 4.4: stamp only after a fixed 40 ms OpenAI
+                    // chunk is successfully enqueued to the realtime
+                    // transport. Stamping every capture frame would
+                    // undercount the batching delay.
+                    // Lock time: sub-microsecond (just store an Instant).
+                    if sent_to_openai {
+                        *graph_last_send.lock() = Some(std::time::Instant::now());
+                    }
+                }
+            })
+            .await
+            .ok();
+        });
+        g.graph_task = Some(graph_task);
+
+        // ── Task 4.5: capture watcher — one-shot auto-restart ─────────
+        //
+        // Polls every 500 ms to detect graph_task completion (which
+        // happens when the capture thread's sender drops = device lost).
+        // On device loss: emits a retryable AppError::audio_device_lost,
+        // then — if `capture_restart_allowed` is still true — attempts
+        // ONE automatic restart using the default device.
+        //
+        // `capture_restart_allowed` is set to true on mode-entry
+        // (inside `set_mode`) and to false on the first auto-restart
+        // attempt, preventing infinite restart storms.
+        //
+        // The watcher accesses the engine via `app.state::<Arc<Engine>>`
+        // so it holds no direct Arc<Engine> reference — no circular Arc.
+        let watcher_app = self.app.clone();
+        let watcher_restart_allowed = Arc::clone(&self.capture_restart_allowed);
+        let watcher_mode_atomic = Arc::clone(&self.mode_atomic);
+        // The watcher needs a JoinHandle<()> to poll graph_task.is_finished().
+        // We give it a shared Arc<AtomicBool> "capture_exited" that the
+        // graph_task sets to true when the blocking recv loop exits.
+        // This avoids needing to share the JoinHandle (which is not Clone).
+        let capture_exited = Arc::new(AtomicBool::new(false));
+        let capture_exited_graph = Arc::clone(&capture_exited);
+
+        // Re-wrap the graph_task to set capture_exited when it completes.
+        // We need to take the just-stored graph_task out and wrap it.
+        let raw_graph_task = g.graph_task.take().expect("just set above");
+        let graph_task_wrapped = tauri::async_runtime::spawn(async move {
+            raw_graph_task.await.ok();
+            capture_exited_graph.store(true, Ordering::Release);
+        });
+        g.graph_task = Some(graph_task_wrapped);
+
+        let capture_watcher_task = tauri::async_runtime::spawn(async move {
+            use tauri::Manager as _;
+
+            // Poll until capture_exited is true (device lost / channel closed).
             loop {
-                tick.tick().await;
-                let in_rms = f32::from_bits(level_arc.load(Ordering::Relaxed));
-                let _ = level_app.emit("input-level", in_rms);
-                let _ = level_app.emit("output-level", 0.0f32);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                if capture_exited.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+
+            // Capture thread has exited.  Check if mode still needs capture.
+            let current_mode = ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
+            let routing = intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
+            let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
+
+            if !mode_needs_capture {
+                // Mode no longer needs capture — not a crash, just mode change.
+                return;
+            }
+
+            // Emit retryable error to the frontend.
+            // The `RecoveryAction` points to `set_virtual_mic_mode` which
+            // the user can invoke to re-enter the current mode and restart
+            // capture.  `audio_device_lost_retryable()` carries this action.
+            let _ = watcher_app.emit(
+                "error",
+                intervox_core::AppError::audio_device_lost_retryable(),
+            );
+
+            // Attempt ONE automatic restart if the allowance flag is still set.
+            // Consume the flag atomically (compare_exchange false→true→false).
+            let was_allowed = watcher_restart_allowed
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+
+            if !was_allowed {
+                // Auto-restart already used (or intentionally disabled) —
+                // surface only; user must retry via the banner.
+                return;
+            }
+
+            // Short delay before restarting to let the OS settle.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Re-check mode after the delay.
+            let current_mode = ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
+            let routing = intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
+            if !(routing.mic_to_ring || routing.mic_to_openai) {
+                return;
+            }
+
+            // Perform the restart via the engine's state.
+            if let Some(engine) = watcher_app.try_state::<std::sync::Arc<Engine>>() {
+                let device_id = {
+                    let g = engine.inner.lock();
+                    // Only restart if capture is not already running
+                    // (a manual restart via set_mode may have beaten us).
+                    if g.capture.is_some() {
+                        return;
+                    }
+                    g.source_device_id.clone()
+                };
+                match engine
+                    .open_capture_for_device(device_id.clone(), Arc::clone(&engine.backpressure))
+                {
+                    Ok((handle, rx)) => {
+                        let mut g = engine.inner.lock();
+                        let current_mode =
+                            ring::mode_from_u32(watcher_mode_atomic.load(Ordering::Relaxed));
+                        let routing =
+                            intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
+                        let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
+                        if mode_needs_capture
+                            && g.capture.is_none()
+                            && g.source_device_id == device_id
+                        {
+                            engine.install_capture_locked(&mut g, handle, rx);
+                        } else {
+                            drop(g);
+                            handle.stop_in_background("stale-auto-restart-capture");
+                            drop(rx);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[engine] failed to auto-restart capture: {e}");
+                        let _ = watcher_app.emit("error", e);
+                    }
+                }
             }
         });
-        g.probe_level_task = Some(level_task);
-        Ok(())
+        g.capture_watcher_task = Some(capture_watcher_task);
     }
 
     fn stop_level_probe_locked(&self, g: &mut Inner) {
-        if let Some(t) = g.probe_level_task.take() {
-            t.abort();
+        if let Some(handle) = g.probe_capture.take() {
+            handle.stop_in_background("probe-capture");
         }
-        g.probe_capture.take();
-        self.level.store(0, Ordering::Relaxed);
-        let _ = self.app.emit("input-level", 0.0f32);
+        self.publish_input_level_zero();
     }
 
-    /// Stop CPAL capture, the level-emit task, and the graph task.
+    /// Stop CPAL capture and the graph task.
     ///
     /// Caller must hold the `inner` mutex lock.
     fn stop_capture_locked(&self, g: &mut Inner) {
-        // Abort the level-emit task first (it references the level Arc).
-        if let Some(t) = g.level_task.take() {
-            t.abort();
+        let started = std::time::Instant::now();
+        lifecycle_trace(format!(
+            "capture.stop_locked start capture={} graph={} watcher={}",
+            g.capture.is_some(),
+            g.graph_task.is_some(),
+            g.capture_watcher_task.is_some()
+        ));
+        if let Some(stop) = g.graph_stop.take() {
+            stop.store(true, Ordering::Release);
         }
         // Abort the graph task (it holds the channel receiver).
         if let Some(t) = g.graph_task.take() {
@@ -1524,22 +1951,26 @@ impl Engine {
         if let Some(t) = g.capture_watcher_task.take() {
             t.abort();
         }
-        // Drop the handle → sets stop flag + joins the capture thread.
-        g.capture = None;
+        // Signal capture stop and reap it off the mode-switch path. CoreAudio
+        // stream teardown can stall, so silence must not wait for thread join.
+        if let Some(handle) = g.capture.take() {
+            handle.stop_in_background("live-capture");
+        }
 
-        // Honest idle: reset both level atomics to 0 and emit final zero
-        // events so the UI VU meters return to zero rather than sticking at
-        // the last captured value.
-        self.level.store(0, Ordering::Relaxed);
-        self.out_level.store(0, Ordering::Relaxed);
-        let _ = self.app.emit("input-level", 0.0f32);
-        let _ = self.app.emit("output-level", 0.0f32);
+        // Honest idle: reset both level atomics. The meter task owns frontend
+        // delivery and will publish a coherent zero frame on the next tick.
+        self.publish_input_level_zero();
+        self.publish_output_level_zero();
+        lifecycle_trace(format!(
+            "capture.stop_locked done elapsed_ms={}",
+            started.elapsed().as_millis()
+        ));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AudioBackpressureCounters;
+    use super::{AudioBackpressureCounters, MeterChannelFreshness, METER_STALE_TICKS};
 
     #[test]
     fn backpressure_snapshot_reports_all_counter_totals() {
@@ -1559,5 +1990,44 @@ mod tests {
         assert_eq!(snapshot.uplink_no_session_drops, 1);
         assert_eq!(snapshot.uplink_queue_drops, 1);
         assert_eq!(snapshot.uplink_chunks_sent, 1);
+    }
+
+    #[test]
+    fn meter_events_preserve_constant_level_when_sequence_advances() {
+        let mut freshness = MeterChannelFreshness::default();
+
+        for sequence in 1..=3 {
+            let sample = freshness.sample(0.25, sequence);
+            assert!(sample.active);
+            assert_eq!(sample.level, 0.25);
+        }
+    }
+
+    #[test]
+    fn meter_events_zero_stale_level_when_sequence_stops() {
+        let mut freshness = MeterChannelFreshness::default();
+
+        let first = freshness.sample(0.4, 1);
+        assert!(first.active);
+        assert_eq!(first.level, 0.4);
+
+        for _ in 0..METER_STALE_TICKS {
+            let still_fresh = freshness.sample(0.4, 1);
+            assert!(still_fresh.active);
+            assert_eq!(still_fresh.level, 0.4);
+        }
+
+        let stale = freshness.sample(0.4, 1);
+        assert!(!stale.active);
+        assert_eq!(stale.level, 0.0);
+    }
+
+    #[test]
+    fn meter_events_without_any_samples_are_inactive() {
+        let mut freshness = MeterChannelFreshness::default();
+        let sample = freshness.sample(0.4, 0);
+
+        assert!(!sample.active);
+        assert_eq!(sample.level, 0.0);
     }
 }

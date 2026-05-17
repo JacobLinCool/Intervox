@@ -12,7 +12,7 @@
 //! The callback is `FnMut + Send + 'static`.  It owns:
 //! - A `LinearResampler` (streaming, carries phase across chunks).
 //! - The `sink` sender (`SyncSender<Vec<f32>>`).
-//! - The `level` `Arc<AtomicU32>` (shared with the Engine's 20 Hz emitter).
+//! - The input meter atomics (shared with the Engine's 20 Hz meter emitter).
 //!
 //! The callback NEVER blocks and never allocates after stream construction:
 //! it borrows preallocated buffers from a bounded pool, fills one, and
@@ -50,8 +50,10 @@ const MAX_CAPTURE_OUTPUT_FRAMES: usize = 32_768;
 
 /// `Send` handle to the dedicated capture thread.
 ///
-/// Dropping this handle signals the thread to stop and blocks until the thread
-/// exits (joining cleanly drops the `cpal::Stream` inside the thread).
+/// Dropping this handle signals the thread to stop but does not synchronously
+/// join it. CoreAudio stream teardown is OS I/O and must not sit on the UI mode
+/// switch path. Call `stop_in_background` when the caller wants a best-effort
+/// reaper thread to observe completion.
 pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -89,22 +91,42 @@ impl Drop for CapturedFrame {
 }
 
 impl CaptureHandle {
-    /// Signal the capture thread to stop and wait for it to exit.
-    #[allow(dead_code)]
-    pub fn stop(mut self) {
+    fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.as_ref() {
+            t.thread().unpark();
+        }
+    }
+
+    /// Signal the capture thread to stop and join it from a short-lived reaper
+    /// thread. The caller returns immediately; any CoreAudio teardown stall is
+    /// isolated from Tauri command handling and engine locks.
+    pub fn stop_in_background(mut self, label: &'static str) {
+        self.request_stop();
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            let spawn_result = std::thread::Builder::new()
+                .name(format!("{label}-stop"))
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let _ = t.join();
+                    let elapsed = started.elapsed();
+                    if elapsed > Duration::from_secs(2) {
+                        eprintln!(
+                            "[engine] {label} stop join completed after {} ms",
+                            elapsed.as_millis()
+                        );
+                    }
+                });
+            if let Err(e) = spawn_result {
+                eprintln!("[engine] failed to spawn {label} stop reaper: {e}");
+            }
         }
     }
 }
 
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        self.request_stop();
     }
 }
 
@@ -168,18 +190,40 @@ fn resampler_has_capacity(
 
 /// Resolve a cpal input device from a frontend `device_id`.
 ///
-/// Frontend IDs have the form `"coreaudio:<name>"`.  Strip the prefix and
-/// search by `device.name()`. Use `host.devices()` instead of
-/// `host.input_devices()` so resolving a selected mic does not ask every
-/// device for supported stream configs before opening the one stream we need.
-/// Uses the system default only when no explicit `device_id` is provided.
-/// An explicit but missing device is a hard error so the UI cannot claim it is
-/// listening to one microphone while CPAL silently captures another.
+/// Frontend IDs are stable CoreAudio UID ids (`coreaudio:uid:<uid>`). CPAL 0.15
+/// does not expose the underlying `AudioDeviceID`, so the final handoff to CPAL
+/// still has to select by display name. To avoid silently opening the wrong mic,
+/// we first resolve the UID through our CoreAudio enumerator and reject devices
+/// whose display name is not unique among input devices.
+///
+/// Use `host.devices()` instead of `host.input_devices()` so resolving a
+/// selected mic does not ask every device for supported stream configs before
+/// opening the one stream we need. Uses the system default only when no explicit
+/// `device_id` is provided.
 fn resolve_input_device(device_id: Option<&str>) -> Result<cpal::Device, AppError> {
     let host = cpal::default_host();
 
     if let Some(id) = device_id {
-        let target_name = id.strip_prefix("coreaudio:").unwrap_or(id);
+        if !crate::devices::is_coreaudio_uid_id(id) {
+            return Err(AppError::audio_device_unavailable(
+                "The selected microphone id is not a CoreAudio UID. Reselect the microphone.",
+            ));
+        }
+
+        let selected = crate::devices::resolve_input_device_id(id).ok_or_else(|| {
+            AppError::audio_device_unavailable(
+                "The selected microphone is not visible to CoreAudio.",
+            )
+        })?;
+
+        if selected.duplicate_name_count > 1 {
+            return Err(AppError::audio_device_unavailable(format!(
+                "Multiple CoreAudio input devices are named '{}'. CPAL cannot safely disambiguate them; rename one device in Audio MIDI Setup.",
+                selected.name
+            )));
+        }
+
+        let target_name = selected.name;
         let devices = host
             .devices()
             .map_err(|e| AppError::internal(format!("enumerate CoreAudio devices: {e}")))?;
@@ -222,8 +266,8 @@ fn resolved_device_name(device: &cpal::Device) -> String {
 /// The callback:
 /// 1. Converts samples to `f32` (via `f32::from_sample`).
 /// 2. Downmixes interleaved N-ch → mono.
-/// 3. Resamples to `TARGET_HZ` with the stateful `LinearResampler`.
-/// 4. Computes level and stores `rms` bits into `level`.
+/// 3. Computes the input meter level before touching downstream buffers.
+/// 4. Resamples to `TARGET_HZ` with the stateful `LinearResampler`.
 /// 5. `try_send`s the frame — drops on full/disconnected (never blocks).
 #[allow(clippy::too_many_arguments)]
 fn build_stream<T>(
@@ -233,6 +277,8 @@ fn build_stream<T>(
     pool_tx: SyncSender<Vec<f32>>,
     pool_rx: Receiver<Vec<f32>>,
     level: Arc<AtomicU32>,
+    level_sequence: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
     stream_error: Arc<AtomicBool>,
     backpressure: Arc<AudioBackpressureCounters>,
 ) -> Result<cpal::Stream, AppError>
@@ -250,6 +296,9 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
                 let input_frames = data.len() / usize::from(channels);
                 if input_frames == 0 {
                     return;
@@ -264,6 +313,13 @@ where
                     backpressure.capture_capacity_drop();
                     return;
                 }
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+
+                let audio_level = LevelMeter::measure(&mono);
+                level.store(audio_level.rms.to_bits(), Ordering::Relaxed);
+                level_sequence.fetch_add(1, Ordering::Release);
 
                 let Ok(mut resampled) = pool_rx.try_recv() else {
                     backpressure.capture_pool_miss();
@@ -276,8 +332,10 @@ where
                 }
                 resampler.process_into(&mono, &mut resampled);
 
-                let audio_level = LevelMeter::measure(&resampled);
-                level.store(audio_level.rms.to_bits(), Ordering::Relaxed);
+                if stop.load(Ordering::Acquire) {
+                    let _ = pool_tx.try_send(resampled);
+                    return;
+                }
 
                 if sink
                     .try_send(CapturedFrame::new(resampled, pool_tx.clone()))
@@ -381,8 +439,9 @@ pub struct CaptureProbeReport {
 
 /// Start microphone capture on a dedicated owning thread.
 ///
-/// - `device_id`: optional frontend device id (`"coreaudio:<name>"`).
+/// - `device_id`: optional frontend device id (`"coreaudio:uid:<uid>"`).
 /// - `level`: shared `AtomicU32` written with `rms.to_bits()` on every chunk.
+/// - `level_sequence`: incremented whenever the input meter receives fresh samples.
 /// - `app`: used to emit `"error"` events from the cpal error callback.
 ///
 /// Returns a `(CaptureHandle, Receiver<Vec<f32>>)`.  The caller owns the
@@ -390,6 +449,7 @@ pub struct CaptureProbeReport {
 pub fn start(
     device_id: Option<&str>,
     level: Arc<AtomicU32>,
+    level_sequence: Arc<AtomicU64>,
     app: tauri::AppHandle,
     backpressure: Arc<AudioBackpressureCounters>,
 ) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<CapturedFrame>), AppError> {
@@ -422,6 +482,7 @@ pub fn start(
             let mut pool_tx_slot = Some(pool_tx);
             let mut pool_rx_slot = Some(pool_rx);
             let mut level_slot = Some(level);
+            let mut level_sequence_slot = Some(level_sequence);
             let mut backpressure_slot = Some(backpressure);
 
             macro_rules! build_for_format {
@@ -431,8 +492,14 @@ pub fn start(
                         &stream_config,
                         tx_slot.take().expect("capture sender taken once"),
                         pool_tx_slot.take().expect("capture pool sender taken once"),
-                        pool_rx_slot.take().expect("capture pool receiver taken once"),
+                        pool_rx_slot
+                            .take()
+                            .expect("capture pool receiver taken once"),
                         level_slot.take().expect("capture level taken once"),
+                        level_sequence_slot
+                            .take()
+                            .expect("capture level sequence taken once"),
+                        Arc::clone(&stop_thread),
                         Arc::clone(&stream_error),
                         backpressure_slot
                             .take()
@@ -482,6 +549,11 @@ pub fn start(
                 }
                 std::thread::park_timeout(std::time::Duration::from_millis(50));
             }
+
+            // Tell CoreAudio to stop the input IOProc before the stream object
+            // is dropped. Relying on drop alone can leave the OS callback
+            // briefly attached after Silence mode has already returned.
+            let _ = stream.pause();
 
             // `stream` is dropped here → CoreAudio tears down the session.
         })
@@ -699,6 +771,37 @@ mod tests {
         assert_eq!(f32::from_bits(max.load(Ordering::Relaxed)), 0.2);
         update_max_rms(&max, 0.4);
         assert_eq!(f32::from_bits(max.load(Ordering::Relaxed)), 0.4);
+    }
+
+    #[test]
+    fn dropping_capture_handle_signals_stop_without_joining() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            let _ = started_tx.send(());
+            while !stop_thread.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("test capture thread should start");
+
+        let handle = CaptureHandle {
+            stop: Arc::clone(&stop),
+            thread: Some(thread),
+        };
+
+        let started = std::time::Instant::now();
+        drop(handle);
+
+        assert!(stop.load(Ordering::Acquire));
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "drop must not wait for capture-thread teardown"
+        );
     }
 
     #[test]

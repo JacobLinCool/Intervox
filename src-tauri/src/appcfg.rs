@@ -36,13 +36,9 @@ pub fn persist(cfg: &Config) -> Result<(), intervox_core::AppError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(
-                |e| {
-                    intervox_core::AppError::invalid_config(format!(
-                        "cannot protect config dir: {e}"
-                    ))
-                },
-            )?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+                intervox_core::AppError::invalid_config(format!("cannot protect config dir: {e}"))
+            })?;
         }
     }
     cfg.save(&p)

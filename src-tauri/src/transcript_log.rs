@@ -16,8 +16,8 @@ pub struct TranscriptRecord {
 }
 
 pub fn transcripts_dir() -> PathBuf {
-    let base = dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
+    let base =
+        dirs::config_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
     base.join("app.intervox.desktop").join("transcripts")
 }
 
@@ -33,14 +33,7 @@ pub struct SessionLog {
 
 impl SessionLog {
     pub fn start(&self, session_start_rfc3339: &str) {
-        let dir = transcripts_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let p = dir.join(format!("{}.jsonl", fs_safe(session_start_rfc3339)));
+        let p = transcripts_dir().join(format!("{}.jsonl", fs_safe(session_start_rfc3339)));
         *self.path.lock().unwrap() = Some(p);
     }
 
@@ -50,22 +43,28 @@ impl SessionLog {
 
     /// Append one record. Best-effort: a write failure is swallowed.
     pub fn append(&self, rec: &TranscriptRecord) {
-        let guard = self.path.lock().unwrap();
-        let Some(p) = guard.as_ref() else { return };
+        let Some(p) = self.path.lock().unwrap().clone() else {
+            return;
+        };
         if let Ok(line) = serde_json::to_string(rec) {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+                }
+            }
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(p)
+                .open(&p)
             {
                 let _ = writeln!(f, "{line}");
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        p,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
                 }
             }
         }

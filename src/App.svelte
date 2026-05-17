@@ -5,7 +5,6 @@
   import Settings from "./components/Settings.svelte";
   import Captions from "./components/Captions.svelte";
   import Onboarding from "./components/Onboarding.svelte";
-  import QuickStatus from "./components/QuickStatus.svelte";
   import Toast from "./components/Toast.svelte";
   import { css } from "$lib/util";
 
@@ -62,10 +61,6 @@
 
   {#if store.onboardingOpen}
     <Onboarding />
-  {/if}
-
-  {#if store.quickOpen}
-    <QuickStatus />
   {/if}
 
   {#if store.lastError}

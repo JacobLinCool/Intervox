@@ -3,7 +3,7 @@
   import { MODES } from "$lib/constants";
   import { PaneTitle, FieldGroup, Row } from "$lib/controls";
   import { Glyph, SysIcon } from "$lib/icons";
-  import { VUStrip, VUBars, formatDbfs } from "$lib/vu";
+  import { VUStrip, formatDbfs } from "$lib/vu";
   import { css } from "$lib/util";
 
   // ── Derived values ──────────────────────────────────────────
@@ -265,16 +265,6 @@
         seed={1}
         height={6}
       />
-      <div style={css({ marginTop: 8 })}>
-        <VUBars
-          level={!hasError && store.mode !== "silence" ? store.inputLevel : 0}
-          bars={28}
-          color="var(--c-accent)"
-          height={18}
-          barWidth={3}
-          seed={6}
-        />
-      </div>
     </div>
 
     <!-- Output meter -->
@@ -317,16 +307,6 @@
         seed={3}
         height={6}
       />
-      <div style={css({ marginTop: 8 })}>
-        <VUBars
-          level={!hasError && store.mode !== "silence" ? store.outputLevel : 0}
-          bars={28}
-          color={meta.color}
-          height={18}
-          barWidth={3}
-          seed={8}
-        />
-      </div>
     </div>
   </div>
 </div>

@@ -1719,6 +1719,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "intervox-core",
+ "libc",
  "objc2",
  "objc2-av-foundation",
  "parking_lot",

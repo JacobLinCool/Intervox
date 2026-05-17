@@ -5,8 +5,8 @@ use intervox_core::usage::UsageStore;
 use std::path::PathBuf;
 
 fn usage_path() -> PathBuf {
-    let base = dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
+    let base =
+        dirs::config_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
     base.join("app.intervox.desktop").join("usage.json")
 }
 
@@ -57,10 +57,7 @@ pub fn save(u: &UsageStore) {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &p,
-                    std::fs::Permissions::from_mode(0o600),
-                );
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
             }
         }
     }

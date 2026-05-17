@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import type { BackendMode } from "./constants";
 
@@ -15,7 +14,45 @@ export interface AppStatus {
 }
 export interface DeviceInfo { id: string; name: string }
 export interface AudioDevices { inputs: DeviceInfo[]; outputs: DeviceInfo[] }
-export interface AudioLevels { inputLevel: number; outputLevel: number }
+export interface AudioMeterFrame {
+  sequence: number;
+  inputLevel: number;
+  outputLevel: number;
+  inputActive: boolean;
+  outputActive: boolean;
+  inputSequence: number;
+  outputSequence: number;
+}
+export interface AudioMeterDiagnostics {
+  backend: {
+    inputLevel: number;
+    outputLevel: number;
+    inputSequence: number;
+    outputSequence: number;
+    lastFrameSequence: number;
+    emitAttempts: number;
+    emitFailures: number;
+  };
+  frontend: FrontendMeterDiagnostics;
+}
+export interface FrontendMeterDiagnostics {
+  eventCount: number;
+  frameSequence: number;
+  inputSequence: number;
+  outputSequence: number;
+  inputLevel: number;
+  outputLevel: number;
+  inputActive: boolean;
+  outputActive: boolean;
+}
+export interface FrontendLifecycleDiagnostics {
+  event: string;
+  mode: BackendMode | null;
+  statusMode: BackendMode | null;
+  configMode: string | null;
+  modeGeneration: number | null;
+  elapsedMs: number | null;
+}
 export interface AudioBackpressureMetrics {
   capturePoolMisses: number;
   captureCapacityDrops: number;
@@ -65,9 +102,14 @@ export interface Config {
 export const cmd = {
   getAppStatus: () => invoke<AppStatus>("get_app_status"),
   getAudioDevices: () => invoke<AudioDevices>("get_audio_devices"),
-  getAudioLevels: () => invoke<AudioLevels>("get_audio_levels"),
   getAudioBackpressureMetrics: () =>
     invoke<AudioBackpressureMetrics>("get_audio_backpressure_metrics"),
+  getAudioMeterDiagnostics: () =>
+    invoke<AudioMeterDiagnostics>("get_audio_meter_diagnostics"),
+  recordFrontendMeterDiagnostics: (diagnostics: FrontendMeterDiagnostics) =>
+    invoke("record_frontend_meter_diagnostics", { diagnostics }),
+  recordFrontendLifecycleDiagnostics: (diagnostics: FrontendLifecycleDiagnostics) =>
+    invoke("record_frontend_lifecycle_diagnostics", { diagnostics }),
   getConfig: () => invoke<Config>("get_config"),
   getAccountStatus: () => invoke<AccountStatus>("get_account_status"),
   setMode: (mode: BackendMode) => invoke("set_virtual_mic_mode", { mode }),
@@ -99,7 +141,7 @@ export const cmd = {
   appVersion: () => getVersion(),
   stopAllAudio: () => invoke("stop_all_audio"),
   completeOnboarding: () => invoke("complete_onboarding"),
-  closeWindow: () => getCurrentWindow().close(),
+  quitApp: () => invoke("quit_app"),
   setMixSettings: (settings: MixSettings) => invoke("set_mix_settings", { settings }),
   openCaptionsWindow: () => invoke("open_captions_window"),
   closeCaptionsWindow: () => invoke("close_captions_window"),
@@ -107,8 +149,8 @@ export const cmd = {
 };
 export const on = {
   status: (f: (s: AppStatus) => void) => listen<AppStatus>("status-changed", (e) => f(e.payload)),
-  inputLevel: (f: (v: number) => void) => listen<number>("input-level", (e) => f(e.payload)),
-  outputLevel: (f: (v: number) => void) => listen<number>("output-level", (e) => f(e.payload)),
+  meter: (f: (v: AudioMeterFrame) => void) =>
+    listen<AudioMeterFrame>("audio-meter", (e) => f(e.payload)),
   backpressure: (f: (m: AudioBackpressureMetrics) => void) =>
     listen<AudioBackpressureMetrics>("audio-backpressure", (e) => f(e.payload)),
   latency: (f: (v: number) => void) => listen<number>("latency-changed", (e) => f(e.payload)),

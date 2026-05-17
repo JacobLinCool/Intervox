@@ -1,7 +1,6 @@
 <script lang="ts">
   import { store, connectionChip } from "$lib/store.svelte";
   import { Glyph, SidebarIcon, Dot } from "$lib/icons";
-  import { MODES } from "$lib/constants";
   import { css } from "$lib/util";
   import StatusPane from "./panes/StatusPane.svelte";
   import AccountPane from "./panes/AccountPane.svelte";
@@ -42,14 +41,6 @@
           : "var(--txt-3)"
   );
   const chipText = $derived(chip.text);
-
-  // Current sidebar item's label for title bar
-  const currentLabel = $derived(
-    SIDEBAR.find((s) => s.id === store.settingsTab)?.label ?? ""
-  );
-
-  // Quick Status trigger: mode meta for dot color
-  const quickMeta = $derived(MODES.find((m) => m.id === store.mode) ?? MODES[2]);
 
   // Hover state for sidebar items
   let hoveredId = $state<string | null>(null);
@@ -185,42 +176,6 @@
       minWidth: 0,
     })}
   >
-    <!-- Title bar (no fake nav chevrons) -->
-    <div
-      style={css({
-        height: 38,
-        padding: "0 18px",
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        borderBottom: "0.5px solid var(--hairline)",
-        background: "color-mix(in oklch, var(--win-bg-solid) 50%, transparent)",
-      })}
-    >
-      <span style={css({ fontSize: 13, fontWeight: 600 })}>{currentLabel}</span>
-      <button
-        class="btn ghost"
-        title="Quick status"
-        onclick={() => store.setQuickOpen(!store.quickOpen)}
-        style={css({
-          marginLeft: "auto",
-          display: "flex",
-          alignItems: "center",
-          gap: 5,
-          padding: "3px 8px",
-          borderRadius: 6,
-          border: "0.5px solid var(--hairline)",
-          background: store.quickOpen ? "var(--row-hover)" : "transparent",
-          cursor: "default",
-          color: "var(--txt-2)",
-          fontSize: 12,
-        })}
-      >
-        <Glyph size={15} color="var(--txt-2)" />
-        <Dot size={6} color={quickMeta.color} />
-      </button>
-    </div>
-
     <!-- Scroll container -->
     <div
       style={css({
