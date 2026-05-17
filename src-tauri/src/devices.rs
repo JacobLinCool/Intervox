@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
-use crate::commands::{AudioDevices, DeviceInfo};
+use crate::commands::{AudioDevices, AudioSourceInfo, AudioSourceKind, DeviceInfo};
 
 type AudioObjectID = u32;
 type AudioDeviceID = u32;
@@ -43,6 +43,8 @@ const PROP_STREAMS: AudioObjectPropertySelector = 0x7374_6d23; // 'stm#'
 
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 pub const CORE_AUDIO_UID_PREFIX: &str = "coreaudio:uid:";
+pub const SYSTEM_AUDIO_SOURCE_ID: &str = "intervox:source:system-audio";
+pub const SYSTEM_AUDIO_SOURCE_NAME: &str = "System Audio";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedInputDevice {
@@ -90,8 +92,30 @@ pub fn enumerate() -> AudioDevices {
 
     let inputs = collect_devices(&devices, default_device(PROP_DEFAULT_INPUT), SCOPE_INPUT);
     let outputs = collect_devices(&devices, default_device(PROP_DEFAULT_OUTPUT), SCOPE_OUTPUT);
+    let sources = collect_sources(&inputs);
 
-    AudioDevices { inputs, outputs }
+    AudioDevices {
+        sources,
+        inputs,
+        outputs,
+    }
+}
+
+fn collect_sources(inputs: &[DeviceInfo]) -> Vec<AudioSourceInfo> {
+    let mut sources = inputs
+        .iter()
+        .map(|device| AudioSourceInfo {
+            id: device.id.clone(),
+            name: device.name.clone(),
+            kind: AudioSourceKind::Microphone,
+        })
+        .collect::<Vec<_>>();
+    sources.push(AudioSourceInfo {
+        id: SYSTEM_AUDIO_SOURCE_ID.to_string(),
+        name: SYSTEM_AUDIO_SOURCE_NAME.to_string(),
+        kind: AudioSourceKind::SystemAudio,
+    });
+    sources
 }
 
 fn collect_devices(
@@ -150,8 +174,23 @@ pub fn uid_from_device_id(device_id: &str) -> Option<&str> {
     device_id.strip_prefix(CORE_AUDIO_UID_PREFIX)
 }
 
+pub fn is_system_audio_source_id(source_id: &str) -> bool {
+    source_id == SYSTEM_AUDIO_SOURCE_ID
+}
+
 pub fn input_device_name_for_id(device_id: &str) -> Option<String> {
     resolve_input_device_id(device_id).map(|device| device.name)
+}
+
+pub fn source_name_for_id(source_id: &str) -> Option<String> {
+    if is_system_audio_source_id(source_id) {
+        return Some(SYSTEM_AUDIO_SOURCE_NAME.to_string());
+    }
+    input_device_name_for_id(source_id)
+}
+
+pub fn source_id_is_available(source_id: &str) -> bool {
+    is_system_audio_source_id(source_id) || resolve_input_device_id(source_id).is_some()
 }
 
 pub fn default_output_device_id() -> Option<String> {
@@ -330,6 +369,28 @@ mod tests {
         assert!(is_coreaudio_uid_id(&id));
         assert_eq!(uid_from_device_id(&id), Some("AppleUSBAudioEngine:Example"));
         assert_eq!(uid_from_device_id("coreaudio:Studio Display"), None);
+    }
+
+    #[test]
+    fn system_audio_source_identity_is_stable() {
+        assert!(is_system_audio_source_id(SYSTEM_AUDIO_SOURCE_ID));
+        assert_eq!(
+            source_name_for_id(SYSTEM_AUDIO_SOURCE_ID),
+            Some(SYSTEM_AUDIO_SOURCE_NAME.to_string())
+        );
+        assert!(source_id_is_available(SYSTEM_AUDIO_SOURCE_ID));
+    }
+
+    #[test]
+    fn collect_sources_appends_system_audio_source() {
+        let sources = collect_sources(&[DeviceInfo {
+            id: "coreaudio:uid:mic".to_string(),
+            name: "Built-in Microphone".to_string(),
+        }]);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].kind, AudioSourceKind::Microphone);
+        assert_eq!(sources[1].id, SYSTEM_AUDIO_SOURCE_ID);
+        assert_eq!(sources[1].kind, AudioSourceKind::SystemAudio);
     }
 
     /// Hardware-dependent: `enumerate()` enters CoreAudio. Keep this out of the

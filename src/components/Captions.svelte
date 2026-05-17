@@ -24,7 +24,7 @@
       : isSilence
       ? { dot: "var(--c-silence)",    text: "Silence · No audio is being sent" }
       : isPass
-      ? { dot: "var(--c-pass)",       text: "Pass-through · Original microphone only" }
+      ? { dot: "var(--c-pass)",       text: "Pass-through · Original source only" }
       : store.mixPercent > 0
       ? { dot: "var(--c-translate)",  text: `${store.langPairText} · Translation + original ${store.mixPercent}% · ${store.latencyText}` }
       :   { dot: "var(--c-translate)", text: `${store.langPairText} · Translating · ${store.latencyText}` }
@@ -34,12 +34,12 @@
   const errorMsgs: Record<string, { t: string; s: string }> = {
     network:    { t: "Connection lost",
                   s: "Translator Mic is sending silence while Intervox reconnects." },
-    mic:        { t: "No audio is coming from your microphone",
-                  s: "Check that the right Source Mic is selected in Audio settings." },
+    mic:        { t: "No audio is coming from your source",
+                  s: "Check that the right input source is selected in Audio settings." },
     driver:     { t: "Translator Mic isn't installed",
                   s: "Install the audio driver so meeting apps can see the virtual mic." },
-    permission: { t: "Microphone permission missing",
-                  s: "Grant microphone access in System Settings → Privacy & Security." },
+    permission: { t: "Audio permission missing",
+                  s: "Grant the required audio access in System Settings → Privacy & Security." },
   };
 </script>
 
@@ -250,7 +250,7 @@
               <div>
                 <div style={css({ fontSize: base, fontWeight: 500 })}>Pass-through</div>
                 <div style={css({ fontSize: base - 4, color: "rgba(255,255,255,0.65)" })}>
-                  Your original microphone audio is sent unchanged.
+                  Your original source audio is sent unchanged.
                 </div>
               </div>
               <div style={css({ marginLeft: "auto" })}>

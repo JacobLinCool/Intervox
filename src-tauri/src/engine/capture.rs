@@ -38,13 +38,13 @@ use tauri::Emitter;
 use super::AudioBackpressureCounters;
 
 /// Target sample rate for the engine (virtual mic + OpenAI path).
-const TARGET_HZ: u32 = 48_000;
+pub(super) const TARGET_HZ: u32 = 48_000;
 
 /// Capacity of the bounded inter-thread channel.
-const SINK_BOUND: usize = 64;
+pub(super) const SINK_BOUND: usize = 64;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_CALLBACK_FRAMES: usize = 16_384;
-const MAX_CAPTURE_OUTPUT_FRAMES: usize = 32_768;
+pub(super) const MAX_CALLBACK_FRAMES: usize = 16_384;
+pub(super) const MAX_CAPTURE_OUTPUT_FRAMES: usize = 32_768;
 
 // ── CaptureHandle ─────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ pub struct CapturedFrame {
 }
 
 impl CapturedFrame {
-    fn new(samples: Vec<f32>, pool: SyncSender<Vec<f32>>) -> Self {
+    pub(super) fn new(samples: Vec<f32>, pool: SyncSender<Vec<f32>>) -> Self {
         Self { samples, pool }
     }
 
@@ -91,6 +91,13 @@ impl Drop for CapturedFrame {
 }
 
 impl CaptureHandle {
+    pub(super) fn new(stop: Arc<AtomicBool>, thread: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
     fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.as_ref() {
@@ -453,6 +460,10 @@ pub fn start(
     app: tauri::AppHandle,
     backpressure: Arc<AudioBackpressureCounters>,
 ) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<CapturedFrame>), AppError> {
+    if device_id.is_some_and(crate::devices::is_system_audio_source_id) {
+        return super::system_audio::start(level, level_sequence, backpressure);
+    }
+
     let device = resolve_input_device(device_id)?;
 
     let supported_config = device
@@ -579,13 +590,7 @@ pub fn start(
         }
     }
 
-    Ok((
-        CaptureHandle {
-            stop,
-            thread: Some(thread),
-        },
-        rx,
-    ))
+    Ok((CaptureHandle::new(stop, thread), rx))
 }
 
 /// Open the selected input device for a bounded duration and report whether

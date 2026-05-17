@@ -264,6 +264,11 @@ mod tests {
     #[test]
     fn state_from_devices_uses_existing_snapshot() {
         let devices = crate::commands::AudioDevices {
+            sources: vec![crate::commands::AudioSourceInfo {
+                id: "coreaudio:Intervox".into(),
+                name: "Intervox".into(),
+                kind: crate::commands::AudioSourceKind::Microphone,
+            }],
             inputs: vec![crate::commands::DeviceInfo {
                 id: "coreaudio:Intervox".into(),
                 name: "Intervox".into(),

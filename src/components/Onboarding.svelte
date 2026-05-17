@@ -39,15 +39,15 @@
   ];
 
   // ── Derived: canNext ────────────────────────────────────────
-  const sourceMicSelected = $derived(!!store.config?.audio.source_mic_id);
+  const sourceSelected = $derived(!!store.config?.audio.source_id);
   const translationTestPassed = $derived(
-    sourceMicSelected && store.audioInputDetected && store.tgtText.trim().length > 0
+    sourceSelected && store.audioInputDetected && store.tgtText.trim().length > 0
   );
   const canNext = $derived(
     step === 1 ? store.account.verified :
     step === 2 ? store.micPermission === "granted" :
     step === 3 ? (store.status?.virtualMicInstalled === true) :
-    step === 4 ? sourceMicSelected :
+    step === 4 ? sourceSelected :
     step === 6 ? translationTestPassed :
     true
   );
@@ -151,7 +151,7 @@
   }
 
   // Step 4 uses a dedicated input-level probe because the live engine can
-  // still be in Silence mode while selecting the source microphone.
+  // still be in Silence mode while selecting the input source.
   $effect(() => {
     if (step !== 4) return;
     void store.startMicLevelProbe();
@@ -182,9 +182,9 @@
     teams: { name: "Microsoft Teams",   hint: "Settings → Devices → Microphone" },
   };
 
-  // Source mic name for meeting step
-  const sourceMicName = $derived(
-    store.devices.inputs.find((d) => d.id === store.config?.audio.source_mic_id)?.name ?? "Your microphone"
+  // Source name for meeting step
+  const sourceName = $derived(
+    store.devices.sources.find((d) => d.id === store.config?.audio.source_id)?.name ?? "Your source"
   );
 </script>
 
@@ -582,7 +582,7 @@
               {/if}
             </div>
 
-          <!-- ── Step 4: Source Mic ─────────────────────────── -->
+          <!-- ── Step 4: Source ─────────────────────────────── -->
           {:else if step === 4}
             <!-- StepTitle -->
             <div style={css({ marginTop: 28, marginBottom: 24 })}>
@@ -590,14 +590,14 @@
                                 textTransform: "uppercase", color: "var(--c-accent)",
                                 marginBottom: 8 })}>Source</div>
               <h1 style={css({ fontSize: 24, fontWeight: 600, margin: 0, lineHeight: 1.2, letterSpacing: -0.2 })}>
-                Which microphone do you want to translate?
+                What audio do you want to translate?
               </h1>
               <p style={css({ fontSize: 14, color: "var(--txt-2)", marginTop: 8, lineHeight: 1.5, maxWidth: 460 })}>
-                Pick the mic Intervox should listen to. We'll show the input level so you know it's hearing you.
+                Pick the source Intervox should listen to. We'll show the input level so you know it's hearing audio.
               </p>
             </div>
             <div class="card" style={css({ padding: 6 })}>
-              {#if store.devices.inputs.length === 0}
+              {#if store.devices.sources.length === 0}
                 <div style={css({
                   display: "flex", alignItems: "center", gap: 12,
                   padding: "10px 12px",
@@ -605,16 +605,16 @@
                   color: "var(--txt-3)",
                   fontSize: 13,
                 })}>
-                  No input devices found.
+                  No input sources found.
                 </div>
               {:else}
-                {#each store.devices.inputs as m (m.id)}
-                  {@const selected = store.config?.audio.source_mic_id === m.id}
-                  <div onclick={() => store.setSourceMic(m.id)}
+                {#each store.devices.sources as source (source.id)}
+                  {@const selected = store.config?.audio.source_id === source.id}
+                  <div onclick={() => store.setAudioSource(source.id)}
                        role="radio"
                        aria-checked={selected}
                        tabindex="0"
-                       onkeydown={(e) => (e.key === "Enter" || e.key === " ") && store.setSourceMic(m.id)}
+                       onkeydown={(e) => (e.key === "Enter" || e.key === " ") && store.setAudioSource(source.id)}
                        style={css({
                          display: "flex", alignItems: "center", gap: 12,
                          padding: "10px 12px",
@@ -630,8 +630,10 @@
                     })}>
                       {#if selected}<Dot size={8} color="var(--c-accent)" />{/if}
                     </span>
-                    <span style={css({ color: "var(--txt-2)" })}><SysIcon name="mic" size={15} /></span>
-                    <span style={css({ fontWeight: 500, fontSize: 13.5 })}>{m.name}</span>
+                    <span style={css({ color: "var(--txt-2)" })}>
+                      <SysIcon name={source.kind === "systemAudio" ? "speaker" : "mic"} size={15} />
+                    </span>
+                    <span style={css({ fontWeight: 500, fontSize: 13.5 })}>{source.name}</span>
                     <div style={css({ marginLeft: "auto", width: 110 })}>
                       <VUStrip level={selected ? store.inputLevel : 0} color="var(--c-translate)" />
                     </div>
@@ -717,7 +719,7 @@
                      "Heard you loud and clear."}
                   </div>
                   <div style={css({ fontSize: 11.5, color: "var(--txt-3)" })}>
-                    Source: {store.devices.inputs.find((d) => d.id === store.config?.audio.source_mic_id)?.name ?? "No input device"}
+                    Source: {store.devices.sources.find((d) => d.id === store.config?.audio.source_id)?.name ?? "No input source"}
                   </div>
                 </div>
                 <div style={css({ width: 140 })}>
@@ -813,7 +815,7 @@
                       background: "transparent",
                       display: "grid", placeItems: "center", color: "#fff",
                     })}></span>
-                    <span>{sourceMicName}</span>
+                    <span>{sourceName}</span>
                   </div>
                   <!-- FakeMicRow: Translator Mic (selected) -->
                   <div style={css({

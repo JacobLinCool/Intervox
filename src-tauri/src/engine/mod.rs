@@ -29,6 +29,7 @@ pub mod playback;
 pub mod realtime;
 pub mod ring;
 pub mod supervisor;
+pub mod system_audio;
 pub mod translate_chain;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -221,8 +222,8 @@ impl MeterChannelFreshness {
 
 struct Inner {
     mode: VirtualMicMode,
-    source_device_id: Option<String>,
-    /// Monotonic token for source-device switches. A slow CoreAudio open from
+    source_id: Option<String>,
+    /// Monotonic token for input-source switches. A slow CoreAudio open from
     /// an older selection must not overwrite a newer user selection.
     source_switch_generation: u64,
     target_language: String,
@@ -379,7 +380,7 @@ impl Engine {
 
         let mut inner = Inner {
             mode: VirtualMicMode::Silence,
-            source_device_id: cfg.audio.source_mic_id.clone(),
+            source_id: cfg.audio.source_id.clone(),
             source_switch_generation: 0,
             target_language: cfg.translation.target_language.clone(),
             capture: None,
@@ -635,17 +636,17 @@ impl Engine {
 
         let needs_capture = routing.mic_to_ring || routing.mic_to_openai;
 
-        let capture_start_device: Option<Option<String>> = {
+        let capture_start_source: Option<Option<String>> = {
             let mut g = self.inner.lock();
             if needs_capture && g.capture.is_none() {
                 lifecycle_trace(format!(
                     "engine.set_mode scheduling_capture mode={mode:?} source={:?}",
-                    g.source_device_id
+                    g.source_id
                 ));
                 self.stop_level_probe_locked(&mut g);
                 // Allow exactly one auto-restart per mode-entry (Task 4.5).
                 self.capture_restart_allowed.store(true, Ordering::Relaxed);
-                Some(g.source_device_id.clone())
+                Some(g.source_id.clone())
             } else if !needs_capture && g.capture.is_some() {
                 lifecycle_trace(format!("engine.set_mode stopping_capture mode={mode:?}"));
                 // No auto-restart when capture is intentionally stopped.
@@ -657,28 +658,25 @@ impl Engine {
             }
         };
 
-        if let Some(device_id) = capture_start_device {
+        if let Some(source_id) = capture_start_source {
             let opened =
-                self.open_capture_for_device(device_id.clone(), Arc::clone(&self.backpressure));
+                self.open_capture_for_device(source_id.clone(), Arc::clone(&self.backpressure));
             match opened {
                 Ok((handle, rx)) => {
                     let mut g = self.inner.lock();
                     let current_routing = intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
                     let current_needs_capture =
                         current_routing.mic_to_ring || current_routing.mic_to_openai;
-                    if current_needs_capture
-                        && g.capture.is_none()
-                        && g.source_device_id == device_id
-                    {
+                    if current_needs_capture && g.capture.is_none() && g.source_id == source_id {
                         self.install_capture_locked(&mut g, handle, rx);
                         lifecycle_trace(format!(
                             "engine.set_mode installed_capture mode={:?} source={:?}",
-                            g.mode, g.source_device_id
+                            g.mode, g.source_id
                         ));
                     } else {
                         lifecycle_trace(format!(
-                            "engine.set_mode discarding_stale_capture current_mode={:?} requested_source={device_id:?} current_source={:?}",
-                            g.mode, g.source_device_id
+                            "engine.set_mode discarding_stale_capture current_mode={:?} requested_source={source_id:?} current_source={:?}",
+                            g.mode, g.source_id
                         ));
                         drop(g);
                         handle.stop_in_background("stale-mode-capture");
@@ -692,16 +690,14 @@ impl Engine {
                             intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
                         let current_needs_capture =
                             current_routing.mic_to_ring || current_routing.mic_to_openai;
-                        current_needs_capture
-                            && g.capture.is_none()
-                            && g.source_device_id == device_id
+                        current_needs_capture && g.capture.is_none() && g.source_id == source_id
                     };
                     if should_surface {
                         eprintln!("[engine] failed to start capture: {e}");
                         let _ = self.app.emit("error", e);
                     } else {
                         lifecycle_trace(format!(
-                            "engine.set_mode ignored_stale_capture_error requested_source={device_id:?}"
+                            "engine.set_mode ignored_stale_capture_error requested_source={source_id:?}"
                         ));
                     }
                 }
@@ -740,7 +736,7 @@ impl Engine {
 
     // ── Device / language setters ─────────────────────────────────────────────
 
-    /// Store the selected source-mic device ID and restart capture if running.
+    /// Store the selected audio source ID and restart capture if running.
     ///
     /// Source switching is a transaction:
     /// - validate the CoreAudio UID before mutating engine state;
@@ -750,15 +746,15 @@ impl Engine {
     ///
     /// Returns `false` when this request was superseded by a newer source switch.
     pub fn set_source_device(&self, id: String) -> Result<bool, AppError> {
-        if crate::devices::resolve_input_device_id(&id).is_none() {
+        if !crate::devices::source_id_is_available(&id) {
             return Err(AppError::audio_device_unavailable(
-                "The selected microphone is not visible to CoreAudio.",
+                "The selected audio source is not available.",
             ));
         }
 
         let (generation, use_live_backpressure) = {
             let mut g = self.inner.lock();
-            if g.source_device_id.as_deref() == Some(id.as_str()) {
+            if g.source_id.as_deref() == Some(id.as_str()) {
                 return Ok(true);
             }
 
@@ -768,7 +764,7 @@ impl Engine {
             let has_running_stream = capture_active || g.probe_capture.is_some();
 
             if !has_running_stream {
-                g.source_device_id = Some(id);
+                g.source_id = Some(id);
                 return Ok(true);
             }
 
@@ -795,7 +791,7 @@ impl Engine {
                     return Err(e);
                 }
 
-                g.source_device_id = Some(id);
+                g.source_id = Some(id);
                 return Ok(true);
             }
         };
@@ -809,7 +805,7 @@ impl Engine {
             return Ok(false);
         }
 
-        g.source_device_id = Some(id);
+        g.source_id = Some(id);
         let routing = intervox_core::FrameRouting::for_mode_and_mix(g.mode, 0);
         let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
 
@@ -939,24 +935,24 @@ impl Engine {
     ///
     /// This is intentionally separate from the live engine capture path. In
     /// onboarding the app is still in Silence mode, but the user must still see
-    /// whether the selected source microphone is receiving audio.
+    /// whether the selected input source is receiving audio.
     pub fn start_level_probe(&self) -> Result<(), AppError> {
-        let device_id = {
+        let source_id = {
             let g = self.inner.lock();
             if g.capture.is_some() || g.probe_capture.is_some() {
                 return Ok(());
             }
-            g.source_device_id.clone()
+            g.source_id.clone()
         };
 
         let (handle, rx) = self.open_capture_for_device(
-            device_id.clone(),
+            source_id.clone(),
             Arc::new(AudioBackpressureCounters::default()),
         )?;
         drop(rx);
 
         let mut g = self.inner.lock();
-        if g.capture.is_none() && g.probe_capture.is_none() && g.source_device_id == device_id {
+        if g.capture.is_none() && g.probe_capture.is_none() && g.source_id == source_id {
             g.probe_capture = Some(handle);
         } else {
             drop(g);
@@ -1083,7 +1079,7 @@ impl Engine {
                     self.stop_output_preview_locked(&mut g);
                     false
                 }
-                (Some(handle), Some(device_id)) if handle.device_id() == device_id => false,
+                (Some(handle), Some(output_id)) if handle.device_id() == output_id => false,
                 _ => {
                     self.stop_output_preview_locked(&mut g);
                     true
@@ -1095,11 +1091,11 @@ impl Engine {
             return;
         }
 
-        let Some(device_id) = default_output_id.map(str::to_string) else {
+        let Some(output_id) = default_output_id.map(str::to_string) else {
             return;
         };
 
-        match playback::start_default_output_for_device_id(device_id) {
+        match playback::start_default_output_for_device_id(output_id) {
             Ok(handle) => {
                 let mut g = self.inner.lock();
                 if g.output_preview_enabled {
@@ -1812,17 +1808,17 @@ impl Engine {
 
     fn open_capture_for_device(
         &self,
-        device_id: Option<String>,
+        source_id: Option<String>,
         backpressure: Arc<AudioBackpressureCounters>,
     ) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<CapturedFrame>), AppError> {
         let started = std::time::Instant::now();
-        lifecycle_trace(format!("capture.open start device_id={device_id:?}"));
+        lifecycle_trace(format!("capture.open start source_id={source_id:?}"));
         let level = Arc::clone(&self.level);
         let input_level_sequence = Arc::clone(&self.input_level_sequence);
         let app = self.app.clone();
 
         let result = capture::start(
-            device_id.as_deref(),
+            source_id.as_deref(),
             level,
             input_level_sequence,
             app,
@@ -1830,11 +1826,11 @@ impl Engine {
         );
         match &result {
             Ok(_) => lifecycle_trace(format!(
-                "capture.open ok device_id={device_id:?} elapsed_ms={}",
+                "capture.open ok source_id={source_id:?} elapsed_ms={}",
                 started.elapsed().as_millis()
             )),
             Err(error) => lifecycle_trace(format!(
-                "capture.open error device_id={device_id:?} elapsed_ms={} error={}",
+                "capture.open error source_id={source_id:?} elapsed_ms={} error={}",
                 started.elapsed().as_millis(),
                 error
             )),
@@ -2015,17 +2011,17 @@ impl Engine {
 
             // Perform the restart via the engine's state.
             if let Some(engine) = watcher_app.try_state::<std::sync::Arc<Engine>>() {
-                let device_id = {
+                let source_id = {
                     let g = engine.inner.lock();
                     // Only restart if capture is not already running
                     // (a manual restart via set_mode may have beaten us).
                     if g.capture.is_some() {
                         return;
                     }
-                    g.source_device_id.clone()
+                    g.source_id.clone()
                 };
                 match engine
-                    .open_capture_for_device(device_id.clone(), Arc::clone(&engine.backpressure))
+                    .open_capture_for_device(source_id.clone(), Arc::clone(&engine.backpressure))
                 {
                     Ok((handle, rx)) => {
                         let mut g = engine.inner.lock();
@@ -2034,10 +2030,7 @@ impl Engine {
                         let routing =
                             intervox_core::FrameRouting::for_mode_and_mix(current_mode, 0);
                         let mode_needs_capture = routing.mic_to_ring || routing.mic_to_openai;
-                        if mode_needs_capture
-                            && g.capture.is_none()
-                            && g.source_device_id == device_id
-                        {
+                        if mode_needs_capture && g.capture.is_none() && g.source_id == source_id {
                             engine.install_capture_locked(&mut g, handle, rx);
                         } else {
                             drop(g);

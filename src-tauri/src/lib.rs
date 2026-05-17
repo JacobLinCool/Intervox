@@ -169,7 +169,7 @@ fn run_cli_probe(options: &CliProbeOptions) -> CliProbeReport {
     let capture_probe = if options.capture_probe {
         let cfg = appcfg::load_or_default();
         Some(run_capture_probe(
-            cfg.audio.source_mic_id.as_deref(),
+            cfg.audio.source_id.as_deref(),
             options.capture_duration_ms,
         ))
     } else {
@@ -591,7 +591,7 @@ pub fn run() {
             commands::get_audio_meter_diagnostics,
             commands::record_frontend_meter_diagnostics,
             commands::record_frontend_lifecycle_diagnostics,
-            commands::set_source_mic,
+            commands::set_audio_source,
             commands::set_output_preview_enabled,
             commands::set_target_language,
             commands::set_mix_settings,
@@ -601,6 +601,7 @@ pub fn run() {
             commands::get_driver_state,
             commands::open_audio_midi_setup,
             commands::open_system_mic_permission_settings,
+            commands::open_system_audio_permission_settings,
             commands::get_mic_permission,
             commands::request_mic_permission,
             commands::start_test_phrase,

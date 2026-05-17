@@ -8,12 +8,22 @@ export type TranslationConn =
   | "idle" | "connecting" | "connected" | "reconnecting" | "failed";
 export interface AppStatus {
   mode: BackendMode; health: Health; translation: TranslationConn;
-  sourceMicName: string | null; virtualMicInstalled: boolean;
+  sourceName: string | null; virtualMicInstalled: boolean;
   openaiConnected: boolean; latencyMs: number | null;
   targetLanguage: string; inputLevel: number; outputLevel: number;
 }
 export interface DeviceInfo { id: string; name: string }
-export interface AudioDevices { inputs: DeviceInfo[]; outputs: DeviceInfo[] }
+export type AudioSourceKind = "microphone" | "systemAudio";
+export interface AudioSourceInfo {
+  id: string;
+  name: string;
+  kind: AudioSourceKind;
+}
+export interface AudioDevices {
+  sources: AudioSourceInfo[];
+  inputs: DeviceInfo[];
+  outputs: DeviceInfo[];
+}
 export interface AudioMeterFrame {
   sequence: number;
   inputLevel: number;
@@ -82,7 +92,7 @@ export interface MixSettings {
 }
 export interface Config {
   version: number;
-  audio: { source_mic_id: string | null; output_preview_enabled: boolean;
+  audio: { source_id: string | null; output_preview_enabled: boolean;
            virtual_mic_mode: string; input_gain_db: number; limiter_enabled: boolean };
   translation: { target_language: string };
   mix: { original_voice_percent: number; translated_voice_percent: number; duck_original: boolean };
@@ -113,7 +123,7 @@ export const cmd = {
   getConfig: () => invoke<Config>("get_config"),
   getAccountStatus: () => invoke<AccountStatus>("get_account_status"),
   setMode: (mode: BackendMode) => invoke("set_virtual_mic_mode", { mode }),
-  setSourceMic: (deviceId: string) => invoke("set_source_mic", { deviceId }),
+  setAudioSource: (sourceId: string) => invoke("set_audio_source", { sourceId }),
   setOutputPreviewEnabled: (enabled: boolean) =>
     invoke("set_output_preview_enabled", { enabled }),
   setTargetLanguage: (language: string) => invoke("set_target_language", { language }),
@@ -130,6 +140,8 @@ export const cmd = {
   getDriverState: () => invoke<DriverState>("get_driver_state"),
   openAudioMidiSetup: () => invoke("open_audio_midi_setup"),
   openMicPermissionSettings: () => invoke<MicPermission>("open_system_mic_permission_settings"),
+  openSystemAudioPermissionSettings: () =>
+    invoke("open_system_audio_permission_settings"),
   getMicPermission: () => invoke<MicPermission>("get_mic_permission"),
   requestMicPermission: () => invoke<MicPermission>("request_mic_permission"),
   startTestPhrase: () => invoke("start_test_phrase"),

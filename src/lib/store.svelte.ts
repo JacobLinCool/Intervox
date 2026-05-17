@@ -147,7 +147,7 @@ function isNonTranslatingBackendMode(mode: BackendMode): boolean {
 class Store {
   // ── State ──────────────────────────────────────────────────
   status: AppStatus | null = $state(null);
-  devices: AudioDevices = $state({ inputs: [], outputs: [] });
+  devices: AudioDevices = $state({ sources: [], inputs: [], outputs: [] });
   config: Config | null = $state(null);
   account: AccountStatus = $state({
     hasKey: false,
@@ -323,7 +323,7 @@ class Store {
   get errorKind(): ErrorKind {
     const code = this.lastError?.code;
     if (!code) return null;
-    if (code === "MIC_PERMISSION_DENIED") return "permission";
+    if (code === "MIC_PERMISSION_DENIED" || code === "SYSTEM_AUDIO_PERMISSION_DENIED") return "permission";
     if (code === "DRIVER_MISSING") return "driver";
     if (code === "NETWORK_ERROR") return "network";
     if (code === "AUDIO_DEVICE_LOST" || code.startsWith("MIC_")) return "mic";
@@ -533,19 +533,19 @@ class Store {
     if (this.status) this.status = { ...this.status, targetLanguage: code };
   }
 
-  async setSourceMic(id: string): Promise<void> {
-    const previousId = this.config?.audio.source_mic_id ?? null;
-    const previousName = this.status?.sourceMicName ?? null;
+  async setAudioSource(id: string): Promise<void> {
+    const previousId = this.config?.audio.source_id ?? null;
+    const previousName = this.status?.sourceName ?? null;
     const nextName =
-      this.devices.inputs.find((d) => d.id === id)?.name
+      this.devices.sources.find((d) => d.id === id)?.name
         ?? id.replace(/^coreaudio:uid:/, "CoreAudio device ");
-    if (this.config) this.config.audio.source_mic_id = id;
-    if (this.status) this.status = { ...this.status, sourceMicName: nextName };
+    if (this.config) this.config.audio.source_id = id;
+    if (this.status) this.status = { ...this.status, sourceName: nextName };
 
-    const ok = await this.tryCmd(() => cmd.setSourceMic(id));
+    const ok = await this.tryCmd(() => cmd.setAudioSource(id));
     if (!ok) {
-      if (this.config) this.config.audio.source_mic_id = previousId;
-      if (this.status) this.status = { ...this.status, sourceMicName: previousName };
+      if (this.config) this.config.audio.source_id = previousId;
+      if (this.status) this.status = { ...this.status, sourceName: previousName };
       return;
     }
     await this.refreshStatus();
@@ -697,6 +697,10 @@ class Store {
         this.lastError = e as AppError;
       }
     }
+  }
+
+  async openSystemAudioPermission(): Promise<void> {
+    await this.tryCmd(() => cmd.openSystemAudioPermissionSettings());
   }
 
   async openAccessibilitySettings(): Promise<void> {

@@ -7,11 +7,17 @@
   import { css } from "$lib/util";
   import ModeCard from "./ModeCard.svelte";
 
-  let sourceMicValue = $derived(
-    store.config?.audio.source_mic_id ?? store.devices.inputs[0]?.id ?? "",
+  type SourceOption = { value: string; label: string; kind: "microphone" | "systemAudio" };
+
+  let sourceOptions: SourceOption[] = $derived(
+    store.devices.sources.map((d) => ({ value: d.id, label: d.name, kind: d.kind })),
+  );
+  let sourceValue = $derived(store.config?.audio.source_id ?? store.devices.sources[0]?.id ?? "");
+  let selectedSource = $derived(
+    store.devices.sources.find((d) => d.id === sourceValue) ?? null,
   );
 
-  let noDevices = $derived(store.devices.inputs.length === 0);
+  let noSources = $derived(store.devices.sources.length === 0);
   let noOutputDevices = $derived(store.devices.outputs.length === 0);
   let defaultOutputName = $derived(store.devices.outputs[0]?.name ?? "No output device");
   let outputPreviewEnabled = $derived(store.config?.audio.output_preview_enabled ?? false);
@@ -34,29 +40,30 @@
   </div>
 </FieldGroup>
 
-{#snippet micLeft(_o: unknown)}
+{#snippet sourceLeft(o: unknown)}
+  {@const kind = (o as { kind?: string } | undefined)?.kind}
   <span style={css({ color: "var(--txt-2)" })}>
-    <SysIcon name="mic" size={13} />
+    <SysIcon name={kind === "systemAudio" ? "speaker" : "mic"} size={13} />
   </span>
 {/snippet}
 
-<FieldGroup title="Source Microphone">
+<FieldGroup title="Input Source">
   <Row last>
-    <RowLabel title="Listen to" sub="Intervox will translate audio from this mic." />
-    {#if noDevices}
+    <RowLabel title="Listen to" sub="Intervox will translate audio from this source." />
+    {#if noSources}
       <Pulldown
         value=""
         onChange={() => {}}
-        options={[{ value: "", label: "No input devices" }]}
-        optionLeft={micLeft}
+        options={[{ value: "", label: "No input sources" }]}
+        optionLeft={sourceLeft}
         width={300}
       />
     {:else}
       <Pulldown
-        value={sourceMicValue}
-        onChange={(v) => store.setSourceMic(v)}
-        options={store.devices.inputs.map((d) => ({ value: d.id, label: d.name }))}
-        optionLeft={micLeft}
+        value={sourceValue}
+        onChange={(v) => store.setAudioSource(v)}
+        options={sourceOptions}
+        optionLeft={sourceLeft}
         width={300}
       />
     {/if}
@@ -103,7 +110,7 @@
   </Row>
 </FieldGroup>
 
-{#if store.micPermission !== "granted"}
+{#if selectedSource?.kind === "microphone" && store.micPermission !== "granted"}
 <FieldGroup title="Microphone Permission">
   <Row last>
     <RowLabel

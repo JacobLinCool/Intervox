@@ -30,7 +30,7 @@ describe("AudioPane", () => {
     return {
       version: 1,
       audio: {
-        source_mic_id: null,
+        source_id: null,
         output_preview_enabled: outputPreviewEnabled,
         virtual_mic_mode: "silence",
         input_gain_db: 0,
@@ -47,7 +47,7 @@ describe("AudioPane", () => {
     };
   }
 
-  it("renders 3 mode cards and honest 'no input devices' when device list empty", () => {
+  it("renders 3 mode cards and honest 'no input sources' when device list empty", () => {
     const { container } = r3(AudioPane as any);
     expect(container.innerHTML).toContain("Output Mode");
     expect(container.innerHTML).toContain("Translate");
@@ -71,11 +71,40 @@ describe("AudioPane", () => {
     }
   });
 
+  it("renders system audio as an input source and calls store.setAudioSource", async () => {
+    const previousConfig = store.config;
+    const previousDevices = store.devices;
+    const original = store.setAudioSource.bind(store);
+    let selected: string | null = null;
+    store.config = audioPaneConfig(false) as any;
+    store.devices = {
+      sources: [
+        { id: "coreaudio:uid:mic", name: "Built-in Microphone", kind: "microphone" },
+        { id: "intervox:source:system-audio", name: "System Audio", kind: "systemAudio" },
+      ],
+      inputs: [{ id: "coreaudio:uid:mic", name: "Built-in Microphone" }],
+      outputs: [{ id: "coreaudio:uid:default-output", name: "Mac Speakers" }],
+    };
+    store.setAudioSource = async (id: string) => { selected = id; };
+
+    try {
+      const { getByText } = r3(AudioPane as any);
+      await fireEvent.click(getByText("Built-in Microphone").closest("button")!);
+      await fireEvent.click(getByText("System Audio"));
+      expect(selected).toBe("intervox:source:system-audio");
+    } finally {
+      store.setAudioSource = original;
+      store.config = previousConfig;
+      store.devices = previousDevices;
+    }
+  });
+
   it("renders output preview with the default output device name", () => {
     const previousConfig = store.config;
     const previousDevices = store.devices;
     store.config = audioPaneConfig(false) as any;
     store.devices = {
+      sources: [],
       inputs: [],
       outputs: [{ id: "coreaudio:uid:default-output", name: "Mac Speakers" }],
     };
@@ -98,6 +127,7 @@ describe("AudioPane", () => {
     let selected: boolean | null = null;
     store.config = audioPaneConfig(false) as any;
     store.devices = {
+      sources: [],
       inputs: [],
       outputs: [{ id: "coreaudio:uid:default-output", name: "Mac Speakers" }],
     };
@@ -295,7 +325,7 @@ describe("StatusPane driver recovery card", () => {
       mode: "translate",
       health: "error",
       translation: "idle",
-      sourceMicName: null,
+      sourceName: null,
       virtualMicInstalled: false,
       openaiConnected: false,
       latencyMs: null,
@@ -317,7 +347,7 @@ describe("StatusPane driver recovery card", () => {
       mode: "translate",
       health: "ready",
       translation: "connected",
-      sourceMicName: "Built-in Microphone",
+      sourceName: "Built-in Microphone",
       virtualMicInstalled: true,
       openaiConnected: false,
       latencyMs: null,

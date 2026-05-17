@@ -10,9 +10,12 @@
   const meta = $derived(MODES.find((m) => m.id === store.mode) ?? MODES[2]);
   const isTranslating = $derived(store.isTranslating);
   const hasError = $derived(!!store.lastError);
+  const selectedSource = $derived(
+    store.devices.sources.find((d) => d.id === store.config?.audio.source_id) ?? null
+  );
   const selectedSourceName = $derived(
-    store.status?.sourceMicName
-      ?? store.devices.inputs.find((d) => d.id === store.config?.audio.source_mic_id)?.name
+    store.status?.sourceName
+      ?? selectedSource?.name
       ?? null
   );
 
@@ -28,10 +31,11 @@
 
   // ── System check rows ───────────────────────────────────────
   const checks = $derived.by(() => {
-    const micPermOk = store.micPermission === "granted";
+    const micPermRequired = selectedSource?.kind !== "systemAudio";
+    const micPermOk = !micPermRequired || store.micPermission === "granted";
     const virtualMicOk = store.status?.virtualMicInstalled === true;
     const keyOk = store.account.verified;
-    const sourceMicOk = store.errorKind !== "mic" && !!selectedSourceName;
+    const sourceOk = store.errorKind !== "mic" && !!selectedSourceName;
 
     const rows: Array<{
       ok: boolean;
@@ -42,13 +46,15 @@
       onCta?: () => void;
       instruction?: boolean;
     }> = [
-      {
-        ok: micPermOk,
-        label: "Microphone permission granted",
-        failLabel: "Microphone permission missing",
-        cta: "Open System Settings",
-        onCta: () => store.openMicPermission(),
-      },
+      micPermRequired
+        ? {
+            ok: micPermOk,
+            label: "Microphone permission granted",
+            failLabel: "Microphone permission missing",
+            cta: "Open System Settings",
+            onCta: () => store.openMicPermission(),
+          }
+        : null,
       {
         ok: virtualMicOk,
         label: "Translator Mic installed",
@@ -100,10 +106,10 @@
                   : { ok: true, label: "Translation service idle" }
         : null,
       {
-        ok: sourceMicOk,
-        label: `Source microphone selected — ${selectedSourceName ?? "unknown"}`,
-        failLabel: "No source microphone selected",
-        cta: "Choose another microphone",
+        ok: sourceOk,
+        label: `Audio source selected — ${selectedSourceName ?? "unknown"}`,
+        failLabel: "No audio source selected",
+        cta: "Choose another source",
         onCta: () => store.setSettingsTab("audio"),
       },
       {

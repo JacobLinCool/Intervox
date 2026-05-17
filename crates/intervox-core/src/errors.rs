@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum AppErrorCode {
     DriverMissing,
     MicPermissionDenied,
+    SystemAudioPermissionDenied,
     NetworkError,
     OpenaiAuthError,
     AudioDeviceLost,
@@ -22,6 +23,7 @@ impl AppErrorCode {
         match self {
             AppErrorCode::DriverMissing => "DRIVER_MISSING",
             AppErrorCode::MicPermissionDenied => "MIC_PERMISSION_DENIED",
+            AppErrorCode::SystemAudioPermissionDenied => "SYSTEM_AUDIO_PERMISSION_DENIED",
             AppErrorCode::NetworkError => "NETWORK_ERROR",
             AppErrorCode::OpenaiAuthError => "OPENAI_AUTH_ERROR",
             AppErrorCode::AudioDeviceLost => "AUDIO_DEVICE_LOST",
@@ -71,6 +73,18 @@ impl AppError {
             Some(RecoveryAction {
                 label: "Open System Settings".into(),
                 command: "open_system_mic_permission_settings".into(),
+            }),
+        )
+    }
+
+    pub fn system_audio_permission_denied(message: impl Into<String>) -> Self {
+        Self::new(
+            AppErrorCode::SystemAudioPermissionDenied,
+            "System audio access is off",
+            message,
+            Some(RecoveryAction {
+                label: "Open System Settings".into(),
+                command: "open_system_audio_permission_settings".into(),
             }),
         )
     }
@@ -194,6 +208,15 @@ mod tests {
         assert_eq!(e.code, AppErrorCode::MicPermissionDenied);
         let ra = e.recovery_action.as_ref().expect("recovery action");
         assert_eq!(ra.command, "open_system_mic_permission_settings");
+        assert!(!ra.label.is_empty());
+    }
+
+    #[test]
+    fn system_audio_permission_denied_matches_spec_contract() {
+        let e = AppError::system_audio_permission_denied("permission missing");
+        assert_eq!(e.code, AppErrorCode::SystemAudioPermissionDenied);
+        let ra = e.recovery_action.as_ref().expect("recovery action");
+        assert_eq!(ra.command, "open_system_audio_permission_settings");
         assert!(!ra.label.is_empty());
     }
 

@@ -1722,6 +1722,10 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-av-foundation",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-foundation",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",
@@ -2265,6 +2269,7 @@ dependencies = [
  "objc2",
  "objc2-core-audio-types",
  "objc2-core-foundation",
+ "objc2-foundation",
 ]
 
 [[package]]

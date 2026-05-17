@@ -25,7 +25,7 @@ pub fn db_to_percent(db: f32) -> f32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
-    pub source_mic_id: Option<String>,
+    pub source_id: Option<String>,
     pub output_preview_enabled: bool,
     pub virtual_mic_mode: String,
     pub input_gain_db: f32,
@@ -35,7 +35,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            source_mic_id: None,
+            source_id: None,
             output_preview_enabled: false,
             virtual_mic_mode: "silence".into(),
             input_gain_db: 0.0,
@@ -245,6 +245,7 @@ mod tests {
     fn default_matches_spec_section_10() {
         let c = Config::default();
         assert_eq!(c.version, 1);
+        assert_eq!(c.audio.source_id, None);
         assert_eq!(c.audio.virtual_mic_mode, "silence");
         assert!(!c.audio.output_preview_enabled);
         assert!(c.audio.limiter_enabled);

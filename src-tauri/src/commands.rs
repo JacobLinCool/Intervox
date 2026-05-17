@@ -43,7 +43,7 @@ impl AppHandle {
         )) {
             state.transition(mode);
         }
-        state.status.source_mic_name = cfg.audio.source_mic_id.as_deref().map(device_label_from_id);
+        state.status.source_name = cfg.audio.source_id.as_deref().map(device_label_from_id);
         state.status.target_language = cfg.translation.target_language.clone();
         AppHandle {
             state: Mutex::new(state),
@@ -90,67 +90,33 @@ pub async fn enumerate_audio_devices_bounded(
 }
 
 fn set_driver_state_from_devices(h: &AppHandle, devices: &AudioDevices) -> DriverState {
-    canonicalize_source_mic_id_from_devices(h, devices);
     let driver_state = crate::driver_status::state_from_devices(devices);
     *h.driver_state.lock().unwrap() = driver_state;
     h.state.lock().unwrap().status.virtual_mic_installed = driver_state == DriverState::Healthy;
-    sync_source_mic_name_from_devices(h, devices);
+    sync_source_name_from_devices(h, devices);
     driver_state
 }
 
 fn device_label_from_id(device_id: &str) -> String {
-    if let Some(label) = legacy_coreaudio_name_id(device_id) {
-        return label.to_string();
+    if crate::devices::is_system_audio_source_id(device_id) {
+        return crate::devices::SYSTEM_AUDIO_SOURCE_NAME.to_string();
     }
     crate::devices::uid_from_device_id(device_id)
         .map(|uid| format!("CoreAudio device {uid}"))
         .unwrap_or_else(|| device_id.to_string())
 }
 
-fn legacy_coreaudio_name_id(device_id: &str) -> Option<&str> {
-    if crate::devices::is_coreaudio_uid_id(device_id) {
-        return None;
-    }
-    device_id.strip_prefix("coreaudio:")
-}
-
-fn canonicalize_source_mic_id_from_devices(h: &AppHandle, devices: &AudioDevices) {
-    let selected_id = h.config.lock().unwrap().audio.source_mic_id.clone();
-    let Some(selected_id) = selected_id else {
-        return;
-    };
-    let Some(legacy_name) = legacy_coreaudio_name_id(&selected_id) else {
-        return;
-    };
-
-    let mut matches = devices
-        .inputs
-        .iter()
-        .filter(|device| device.name == legacy_name);
-    let Some(device) = matches.next() else {
-        return;
-    };
-    if matches.next().is_some() {
-        return;
-    }
-
-    let canonical_id = device.id.clone();
-    let _ = update_config(h, |cfg| {
-        cfg.audio.source_mic_id = Some(canonical_id);
-    });
-}
-
-fn sync_source_mic_name_from_devices(h: &AppHandle, devices: &AudioDevices) {
-    let selected_id = h.config.lock().unwrap().audio.source_mic_id.clone();
+fn sync_source_name_from_devices(h: &AppHandle, devices: &AudioDevices) {
+    let selected_id = h.config.lock().unwrap().audio.source_id.clone();
     let selected_name = selected_id.as_ref().map(|id| {
         devices
-            .inputs
+            .sources
             .iter()
             .find(|device| device.id == *id)
             .map(|device| device.name.clone())
             .unwrap_or_else(|| device_label_from_id(id))
     });
-    h.state.lock().unwrap().status.source_mic_name = selected_name;
+    h.state.lock().unwrap().status.source_name = selected_name;
 }
 
 /// Persist the current config to disk. Must be called **after** dropping any
@@ -327,8 +293,23 @@ pub struct DeviceInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioSourceKind {
+    Microphone,
+    SystemAudio,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioSourceInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: AudioSourceKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevices {
+    pub sources: Vec<AudioSourceInfo>,
     pub inputs: Vec<DeviceInfo>,
     pub outputs: Vec<DeviceInfo>,
 }
@@ -370,14 +351,14 @@ pub fn get_app_status(
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<AppStatus, AppError> {
     let installed = *h.driver_state.lock().unwrap() == DriverState::Healthy;
-    let selected_id = h.config.lock().unwrap().audio.source_mic_id.clone();
+    let selected_id = h.config.lock().unwrap().audio.source_id.clone();
     let (input_level, output_level) = engine.levels();
     let mut st = h.state.lock().unwrap();
     st.status.virtual_mic_installed = installed;
     st.status.input_level = input_level;
     st.status.output_level = output_level;
-    if st.status.source_mic_name.is_none() {
-        st.status.source_mic_name = selected_id.as_deref().map(device_label_from_id);
+    if st.status.source_name.is_none() {
+        st.status.source_name = selected_id.as_deref().map(device_label_from_id);
     }
     Ok(st.status.clone())
 }
@@ -398,21 +379,10 @@ pub async fn set_virtual_mic_mode(
 #[tauri::command]
 pub async fn get_audio_devices(
     h: tauri::State<'_, AppHandle>,
-    engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
+    _engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<AudioDevices, AppError> {
-    let source_before = h.config.lock().unwrap().audio.source_mic_id.clone();
     let devices = enumerate_audio_devices_bounded(Arc::clone(&h.audio_enumeration_running)).await?;
     set_driver_state_from_devices(&h, &devices);
-    let source_after = h.config.lock().unwrap().audio.source_mic_id.clone();
-    if source_after != source_before {
-        if let Some(source_id) = source_after {
-            let engine = std::sync::Arc::clone(&engine);
-            let _ = run_engine_control_result("canonicalize source microphone", move || {
-                engine.set_source_device(source_id)
-            })
-            .await?;
-        }
-    }
     Ok(devices)
 }
 
@@ -475,18 +445,18 @@ pub fn record_frontend_lifecycle_diagnostics(
 }
 
 #[tauri::command]
-pub async fn set_source_mic(
-    device_id: String,
+pub async fn set_audio_source(
+    source_id: String,
     app: tauri::AppHandle,
     h: tauri::State<'_, AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    let source_name = crate::devices::input_device_name_for_id(&device_id)
-        .unwrap_or_else(|| device_label_from_id(&device_id));
+    let source_name = crate::devices::source_name_for_id(&source_id)
+        .unwrap_or_else(|| device_label_from_id(&source_id));
     let engine = std::sync::Arc::clone(&engine);
-    let engine_device_id = device_id.clone();
-    let applied = run_engine_control_result("set source microphone", move || {
-        engine.set_source_device(engine_device_id)
+    let engine_source_id = source_id.clone();
+    let applied = run_engine_control_result("set audio source", move || {
+        engine.set_source_device(engine_source_id)
     })
     .await?;
     if !applied {
@@ -495,9 +465,9 @@ pub async fn set_source_mic(
     }
 
     update_config(&h, |cfg| {
-        cfg.audio.source_mic_id = Some(device_id);
+        cfg.audio.source_id = Some(source_id);
     })?;
-    h.state.lock().unwrap().status.source_mic_name = Some(source_name);
+    h.state.lock().unwrap().status.source_name = Some(source_name);
     emit_status(&app, &h);
     Ok(())
 }
@@ -632,6 +602,15 @@ pub async fn open_system_mic_permission_settings() -> Result<MicPermission, AppE
         crate::permission::open_privacy_pane();
     }
     Ok(permission)
+}
+
+#[tauri::command]
+pub fn open_system_audio_permission_settings() -> Result<(), AppError> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn()
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    Ok(())
 }
 
 #[tauri::command]

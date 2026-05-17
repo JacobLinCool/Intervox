@@ -28,7 +28,11 @@ base64 = "0.22"
 block2 = "0.6"
 libc = "0.2"
 objc2 = "0.6"
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["AudioHardware", "objc2", "objc2-core-audio-types", "objc2-foundation", "std"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["CoreAudioBaseTypes", "std"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFArray", "CFDictionary", "CFNumber", "CFString", "std"] }
 objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSString", "NSValue", "std"] }
 tauri-plugin-global-shortcut = "2"
 
 [features]
