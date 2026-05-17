@@ -26,15 +26,6 @@ own API key, receives translated audio, and writes it to the virtual microphone.
 The product name shown in the UI is **Interpreter Mic**. macOS and some audio
 selectors may show the underlying device as **Intervox**.
 
-## Status
-
-The app path for capture, translation, virtual-mic output, onboarding,
-permission checks, and driver management is implemented.
-
-The remaining release gate is hands-on acceptance on real macOS hardware with a
-real microphone, OpenAI API key, and meeting apps. The manual checklist lives in
-[docs/RUNBOOK-acceptance.md](docs/RUNBOOK-acceptance.md).
-
 ## Requirements
 
 - macOS 14 Sonoma or later.
@@ -130,20 +121,6 @@ Other local files live in the same app-data directory:
 | `usage.json` | Local month and lifetime usage estimate. |
 | `transcripts/*.jsonl` | Per-session transcript history when transcript saving is enabled. |
 | `connection.log` | Capped connection lifecycle log for troubleshooting. |
-
-Do not commit local secret files such as `apikey.secret` or `password.secret`.
-
-## Acceptance
-
-Before calling a build release-ready, run the full manual runbook:
-
-```text
-docs/RUNBOOK-acceptance.md
-```
-
-The runbook checks audio modes, translated voice, original-voice mix, captions,
-quit and restart behavior, privacy and logging, plus smoke tests in Zoom, Google
-Meet, and QuickTime.
 
 ## Docs
 
