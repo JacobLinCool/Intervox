@@ -26,10 +26,10 @@ describe("indicatorState", () => {
 });
 
 describe("connectionChip", () => {
-  it("connected shows green translating with latency", () => {
+  it("connected shows green interpreting with latency", () => {
     const v: ChipView = connectionChip("translate", "connected", "1.2s", null);
     expect(v.tone).toBe("ok");
-    expect(v.text).toBe("Translating · connected · 1.2s");
+    expect(v.text).toBe("Interpreting · connected · 1.2s");
   });
   it("silence is off/neutral", () => {
     expect(connectionChip("silence", "idle", "—", null).tone).toBe("neutral");

@@ -78,8 +78,8 @@
   <!-- toggle_translate -->
   <Row>
     <RowLabel
-      title="Toggle Translate"
-      sub="If translating → Silence; otherwise → Translate"
+      title="Toggle Interpret"
+      sub="If interpreting → Silence; otherwise → Interpret"
       width={220}
     />
     <span style={css({ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" })}>
@@ -106,7 +106,7 @@
           outline: "none",
         })}
         placeholder="Cmd+Shift+T"
-        aria-label="Toggle translate shortcut"
+        aria-label="Toggle interpret shortcut"
       />
     </span>
   </Row>

@@ -91,10 +91,10 @@ Leave this terminal open for the duration of testing. All app output (stdout + s
 **Preferred path — in-app install:**
 
 1. In the Intervox app, click **Status** in the left sidebar.
-2. If the "Translator Mic installed" row shows a warning icon, a **Driver Recovery** card appears at the bottom of the Status pane with an **Install Driver** button.
+2. If the "Interpreter Mic installed" row shows a warning icon, a **Driver Recovery** card appears at the bottom of the Status pane with an **Install Driver** button.
 3. Click **Install Driver**. A macOS administrator password prompt appears.
 4. Enter the admin password. The app calls `scripts/install_driver.sh` via `osascript` with `INTERVOX_ASSUME_YES=1`, which runs `sudo cp`, `sudo chown`, and `sudo killall coreaudiod`. All audio on the machine is briefly interrupted.
-5. After ~2 seconds, click the app's bounded device refresh or reopen the Status pane. The "Translator Mic installed" row should show a green checkmark once CoreAudio exposes the device.
+5. After ~2 seconds, click the app's bounded device refresh or reopen the Status pane. The "Interpreter Mic installed" row should show a green checkmark once CoreAudio exposes the device.
 
 **Manual install path:**
 
@@ -117,13 +117,13 @@ Use **Open Audio MIDI Setup** from Intervox, or use the Status pane's device ref
 5. The app makes a real OpenAI network request to validate the key. On success the field group changes to show **Connected** with a green checkmark and the masked key.
 6. If verification fails, re-check the key on `platform.openai.com` and retry.
 
-### Step S8 — Select "Translator Mic" in each meeting app
+### Step S8 — Select "Interpreter Mic" in each meeting app
 
-Before running each app-specific smoke test (steps A10–A12), select the Intervox virtual microphone as the audio input in that app. Product UI calls it **Translator Mic**; CoreAudio may expose the device name as **Intervox**.
+Before running each app-specific smoke test (steps A10–A12), select the Intervox virtual microphone as the audio input in that app. Product UI calls it **Interpreter Mic**; CoreAudio may expose the device name as **Intervox**.
 
-- **Zoom:** Settings > Audio > Microphone > select **Translator Mic** or **Intervox**.
-- **Google Meet:** gear icon > Audio > Microphone > select **Translator Mic** or **Intervox**.
-- **QuickTime Player:** File > New Audio Recording > microphone selector (the dropdown arrow next to the record button) > select **Translator Mic** or **Intervox**.
+- **Zoom:** Settings > Audio > Microphone > select **Interpreter Mic** or **Intervox**.
+- **Google Meet:** gear icon > Audio > Microphone > select **Interpreter Mic** or **Intervox**.
+- **QuickTime Player:** File > New Audio Recording > microphone selector (the dropdown arrow next to the record button) > select **Interpreter Mic** or **Intervox**.
 
 ---
 
@@ -137,10 +137,10 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 **Action.**
 1. In the Intervox app, go to the **Audio** pane (or the Status pane mode card).
-2. Select the **Silence** mode card. The mode card reads "Silence — No audio is sent through Translator Mic." and the tray title updates to "Silence".
+2. Select the **Silence** mode card. The mode card reads "Silence — No audio is sent through Interpreter Mic." and the tray title updates to "Silence".
 3. Alternatively, press **Cmd+Shift+M** to jump to Silence mode.
 4. Wait 5 seconds.
-5. In Zoom Audio Settings (or Meet audio settings), confirm the input meter for **Translator Mic** shows no movement.
+5. In Zoom Audio Settings (or Meet audio settings), confirm the input meter for **Interpreter Mic** shows no movement.
 6. In the Intervox **Status** pane, confirm the "Translation service idle" row (not "Translation service connected").
 
 **Expected observation.**
@@ -173,10 +173,10 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 ---
 
-### A3 — Translate mode: meeting app hears translated speech only
+### A3 — Interpret mode: meeting app hears translated speech only
 
 **Action.**
-1. Select the **Translate** mode card or the tray item **Translate**.
+1. Select the **Interpret** mode card or the tray item **Interpret**.
 2. In the **Translation** pane, set **Original voice volume** to `0%`.
 3. Confirm the target language is the intended output (the source language is auto-detected by the endpoint — there is no source selector).
 4. Speak a sentence in the source language.
@@ -194,10 +194,10 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 ---
 
-### A4 — Translate with original voice: meeting app hears translated speech with faint delayed original
+### A4 — Interpret with original voice: meeting app hears translated speech with faint delayed original
 
 **Action.**
-1. Select the **Translate** mode card or the tray item **Translate**.
+1. Select the **Interpret** mode card or the tray item **Interpret**.
 2. In the **Translation** pane, set **Original voice volume** above `0%` (for example, `15%`).
 3. Speak a sentence in the source language.
 4. Listen to what the meeting app receives.
@@ -217,7 +217,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 ### A5 — Captions show live source and target text
 
 **Action.**
-1. With the app in **Translate** mode and an active OpenAI session.
+1. With the app in **Interpret** mode and an active OpenAI session.
 2. Open the dedicated captions window via one of:
    - **Captions** pane > "Captions window" toggle.
    - Tray menu > **Captions**.
@@ -240,17 +240,17 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 ### A6 — App quit keeps the virtual mic device available and silent
 
 **Action.**
-1. With the app in any mode, confirm the meeting app shows "Translator Mic" as the selected input.
+1. With the app in any mode, confirm the meeting app shows "Interpreter Mic" as the selected input.
 2. Quit Intervox via **Cmd+Q** or the tray menu **Quit Intervox**.
 3. Do NOT close/reopen the meeting app.
 4. Observe the meeting app's microphone input level and the microphone selector list.
 
 **Expected observation.**
 - The Intervox app process exits (the tray icon disappears).
-- The "Translator Mic" entry remains selectable in the meeting app's microphone list (the HAL driver is still registered with CoreAudio; the shared-memory ring is still present on disk as `/intervox.ring`).
-- The meeting app's microphone input level for "Translator Mic" is zero (the driver reads silence on underrun, which is the state when no ring producer is running).
+- The "Interpreter Mic" entry remains selectable in the meeting app's microphone list (the HAL driver is still registered with CoreAudio; the shared-memory ring is still present on disk as `/intervox.ring`).
+- The meeting app's microphone input level for "Interpreter Mic" is zero (the driver reads silence on underrun, which is the state when no ring producer is running).
 
-**PASS criterion.** "Translator Mic" remains listed in the meeting app's microphone selector after Intervox quits, and the meeting app input level for it is zero.
+**PASS criterion.** "Interpreter Mic" remains listed in the meeting app's microphone selector after Intervox quits, and the meeting app input level for it is zero.
 
 - [ ] **A6 PASS**
 
@@ -267,7 +267,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
    ```
    Enter the admin password when prompted. All audio is briefly interrupted.
 2. Wait 5 seconds.
-3. In the Intervox Status pane, observe the "Translator Mic installed" row.
+3. In the Intervox Status pane, observe the "Interpreter Mic installed" row.
 4. Switch modes and speak to confirm audio flows correctly again.
 
 **App restart test:**
@@ -277,7 +277,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 **Expected observation.**
 - After `killall coreaudiod`: CoreAudio restarts, the driver is reloaded, and within ~5 seconds (one polling cycle) the Intervox Status pane reflects the correct state with no user action.
-- After app restart: the Status pane shows "Translator Mic installed" (green) because the driver was already installed on disk; translation resumes without reinstalling.
+- After app restart: the Status pane shows "Interpreter Mic installed" (green) because the driver was already installed on disk; translation resumes without reinstalling.
 
 **PASS criterion.** Both driver restart and app restart recover to a working translation state without any manual driver reinstall or cleanup step.
 
@@ -289,7 +289,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 **Action.**
 1. Use the log file captured in Step S5: `/tmp/intervox-acceptance.log`.
-2. Run the following greps against the captured log while (or after) running a Translate session:
+2. Run the following greps against the captured log while (or after) running an Interpret session:
 
 ```bash
 # Check for any transcript text fragment — look for common words in the log
@@ -375,18 +375,18 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 
 ### A10 — Zoom smoke test passes
 
-**Prerequisite:** Zoom is installed, signed in, and "Translator Mic" is selected in Zoom Audio Settings.
+**Prerequisite:** Zoom is installed, signed in, and "Interpreter Mic" is selected in Zoom Audio Settings.
 
 **Action.** Perform the following checks inside Zoom (use Zoom's built-in "Test Microphone" feature in Settings > Audio, or join a test call / Zoom's echo test):
 
 1. Set mode to **Silence**. Confirm Zoom input meter shows zero.
 2. Set mode to **Pass-through**. Speak and confirm Zoom input meter shows activity and audio is clear.
-3. Set mode to **Translate** with **Original voice volume** at `0%`. Speak in the source language. Confirm Zoom input meter shows activity and the audio received is in the target language only.
-4. Keep **Translate** selected and raise **Original voice volume** above `0%`. Speak in the source language. Confirm Zoom receives translated speech with faint original underneath.
+3. Set mode to **Interpret** with **Original voice volume** at `0%`. Speak in the source language. Confirm Zoom input meter shows activity and the audio received is in the target language only.
+4. Keep **Interpret** selected and raise **Original voice volume** above `0%`. Speak in the source language. Confirm Zoom receives translated speech with faint original underneath.
 
-**Expected observation.** All behaviors from A1–A4 are reproduced with Zoom as the consumer of the Translator Mic input.
+**Expected observation.** All behaviors from A1–A4 are reproduced with Zoom as the consumer of the Interpreter Mic input.
 
-**PASS criterion.** Silence = zero level in Zoom; Pass-through = original voice in Zoom; Translate at 0% original = translated-only voice in Zoom; Translate above 0% original = translated + quiet original in Zoom.
+**PASS criterion.** Silence = zero level in Zoom; Pass-through = original voice in Zoom; Interpret at 0% original = translated-only voice in Zoom; Interpret above 0% original = translated + quiet original in Zoom.
 
 - [ ] **A10 PASS**
 
@@ -394,14 +394,14 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 
 ### A11 — Google Meet smoke test passes
 
-**Prerequisite:** Google Chrome or Safari with a Google account. "Translator Mic" is selected in Meet's audio settings (gear icon > Audio > Microphone).
+**Prerequisite:** Google Chrome or Safari with a Google account. "Interpreter Mic" is selected in Meet's audio settings (gear icon > Audio > Microphone).
 
 **Action.** Open a Google Meet call (a personal meeting room or an echo test). Perform the same checks as A10:
 
 1. Silence: Meet input meter is zero.
 2. Pass-through: Meet hears original voice.
-3. Translate with original voice at `0%`: Meet hears translated-only voice.
-4. Translate with original voice above `0%`: Meet hears translated with faint original.
+3. Interpret with original voice at `0%`: Meet hears translated-only voice.
+4. Interpret with original voice above `0%`: Meet hears translated with faint original.
 
 **Expected observation.** Same as A10 but via Meet's WebRTC audio stack.
 
@@ -413,17 +413,17 @@ grep "sk-xxxxxxxxxxxx" /tmp/intervox-acceptance.log
 
 ### A12 — QuickTime/CoreAudio capture smoke test passes
 
-**Prerequisite:** QuickTime Player is open. In the recording setup (File > New Audio Recording), the microphone dropdown (the arrow next to the record button) shows **Translator Mic** as the selected device.
+**Prerequisite:** QuickTime Player is open. In the recording setup (File > New Audio Recording), the microphone dropdown (the arrow next to the record button) shows **Interpreter Mic** as the selected device.
 
 **Action.**
 1. Set mode to **Silence**. Press record. Observe the QuickTime level meter. Stop recording. Confirm the recorded audio is silent.
 2. Set mode to **Pass-through**. Press record, speak for 5 seconds, stop. Play back the recording. Confirm your original voice is heard.
-3. Set mode to **Translate** with **Original voice volume** at `0%`. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech only is heard.
-4. Keep **Translate** selected and raise **Original voice volume** above `0%`. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech with faint original.
+3. Set mode to **Interpret** with **Original voice volume** at `0%`. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech only is heard.
+4. Keep **Interpret** selected and raise **Original voice volume** above `0%`. Press record, speak for 5 seconds, stop. Play back. Confirm translated speech with faint original.
 
 **Expected observation.** The CoreAudio capture path (used by QuickTime) correctly reflects all output behaviors just as meeting apps do. This validates the HAL driver layer independently of meeting-app WebRTC.
 
-**PASS criterion.** Silence recording is silent; Pass-through recording contains original voice; Translate at 0% original contains translated-only voice; Translate above 0% original contains translated speech with faint original underneath.
+**PASS criterion.** Silence recording is silent; Pass-through recording contains original voice; Interpret at 0% original contains translated-only voice; Interpret above 0% original contains translated speech with faint original underneath.
 
 - [ ] **A12 PASS**
 
@@ -445,8 +445,8 @@ Fill in this table after completing all steps. Date, tester name, and SHA of the
 |---|---|---|
 | A1 Silence | | |
 | A2 Pass-through | | |
-| A3 Translate | | |
-| A4 Translate original voice mix | | |
+| A3 Interpret | | |
+| A4 Interpret original voice mix | | |
 | A5 Captions live | | |
 | A6 App quit keeps vmic | | |
 | A7 Driver + app restart | | |
@@ -462,7 +462,7 @@ Once all 12 items show PASS, update `docs/STATUS.md` by checking all 12 Product 
 
 ## Troubleshooting
 
-### "Translator Mic" is not visible in Audio MIDI Setup or meeting apps
+### "Interpreter Mic" is not visible in Audio MIDI Setup or meeting apps
 
 1. In the Intervox Status pane, look for the **Driver Recovery** card. Click **Open Audio MIDI Setup** to confirm whether the device is registered.
 2. If the device is missing, use the **Install Driver** or **Reinstall** button in the Driver Recovery card to reinstall. You will be prompted for your admin password.

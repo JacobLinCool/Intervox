@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Intervox 需要存取麥克風，以擷取你的語音、進行即時翻譯，並將結果送入「Translator Mic」虛擬麥克風。</string>
+	<string>Intervox 需要存取麥克風，以擷取你的語音、進行即時翻譯，並將結果送入「Interpreter Mic」虛擬麥克風。</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Intervox 需要擷取系統音訊，以翻譯其他 App 正在播放的聲音，並將結果送入「Translator Mic」虛擬麥克風。</string>
+	<string>Intervox 需要擷取系統音訊，以翻譯其他 App 正在播放的聲音，並將結果送入「Interpreter Mic」虛擬麥克風。</string>
 </dict>
 </plist>

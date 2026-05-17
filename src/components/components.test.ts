@@ -50,8 +50,8 @@ describe("AudioPane", () => {
   it("renders 3 mode cards and honest 'no input sources' when device list empty", () => {
     const { container } = r3(AudioPane as any);
     expect(container.innerHTML).toContain("Output Mode");
-    expect(container.innerHTML).toContain("Translate");
-    expect(container.innerHTML).not.toContain("Translate + Original");
+    expect(container.innerHTML).toContain("Interpret");
+    expect(container.innerHTML).not.toContain("Interpret + Original");
     // honest: with store uninitialized, no fabricated mic names
     expect(container.innerHTML).not.toContain("MacBook Pro Microphone");
     expect(container.innerHTML).not.toContain("Shure MV7");

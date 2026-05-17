@@ -33,7 +33,7 @@
     { id: "mic-perm", label: "Microphone" },
     { id: "driver",   label: "Virtual Mic" },
     { id: "source",   label: "Source" },
-    { id: "target",   label: "Translate to" },
+    { id: "target",   label: "Interpret into" },
     { id: "test",     label: "Test" },
     { id: "meeting",  label: "Meeting Setup" },
   ];
@@ -532,7 +532,7 @@
                                 textTransform: "uppercase", color: "var(--c-accent)",
                                 marginBottom: 8 })}>Virtual Mic</div>
               <h1 style={css({ fontSize: 24, fontWeight: 600, margin: 0, lineHeight: 1.2, letterSpacing: -0.2 })}>
-                Install Translator Mic
+                Install Interpreter Mic
               </h1>
               <p style={css({ fontSize: 14, color: "var(--txt-2)", marginTop: 8, lineHeight: 1.5, maxWidth: 460 })}>
                 This adds a virtual microphone that meeting apps can pick up. It's how Zoom, Google Meet, or Teams hear the translated voice instead of you directly.
@@ -550,7 +550,7 @@
                   <SysIcon name="speaker" size={28} />
                 </div>
                 <div style={css({ flex: 1 })}>
-                  <div style={css({ fontSize: 14, fontWeight: 500 })}>Translator Mic</div>
+                  <div style={css({ fontSize: 14, fontWeight: 500 })}>Interpreter Mic</div>
                   <div style={css({ fontSize: 12.5, color: "var(--txt-3)", marginTop: 2 })}>
                     {installed ? "Installed and ready" : "Audio driver · virtual microphone"}
                   </div>
@@ -561,7 +561,7 @@
                   </span>
                 {:else}
                   <button class="btn primary" onclick={installDriver} disabled={driverLoading}>
-                    {driverLoading ? "Installing…" : "Install Translator Mic"}
+                    {driverLoading ? "Installing…" : "Install Interpreter Mic"}
                   </button>
                 {/if}
               </div>
@@ -576,7 +576,7 @@
                     {store.lastError.message} — The driver isn't available yet; you can skip this step and install it later.
                   {:else}
                     macOS may ask for administrator permission to install the virtual microphone.
-                    This is required for meeting apps to see "Translator Mic" as an audio device.
+                    This is required for meeting apps to see "Interpreter Mic" as an audio device.
                   {/if}
                 </div>
               {/if}
@@ -650,7 +650,7 @@
                                 textTransform: "uppercase", color: "var(--c-accent)",
                                 marginBottom: 8 })}>Target</div>
               <h1 style={css({ fontSize: 24, fontWeight: 600, margin: 0, lineHeight: 1.2, letterSpacing: -0.2 })}>
-                Translate my speech to:
+                Interpret my speech into:
               </h1>
               <p style={css({ fontSize: 14, color: "var(--txt-2)", marginTop: 8, lineHeight: 1.5, maxWidth: 460 })}>
                 You can change this anytime from the menu bar.
@@ -715,7 +715,7 @@
                   <div style={css({ fontSize: 13, fontWeight: 500 })}>
                     {testStage === "listen" ? "Listening…" :
                      testStage === "heard" ? "Audio input detected." :
-                     testStage === "translating" ? `Translating to ${store.targetLang.name}…` :
+                     testStage === "translating" ? `Interpreting into ${store.targetLang.name}…` :
                      "Heard you loud and clear."}
                   </div>
                   <div style={css({ fontSize: 11.5, color: "var(--txt-3)" })}>
@@ -768,7 +768,7 @@
                                 textTransform: "uppercase", color: "var(--c-accent)",
                                 marginBottom: 8 })}>Final Step</div>
               <h1 style={css({ fontSize: 24, fontWeight: 600, margin: 0, lineHeight: 1.2, letterSpacing: -0.2 })}>
-                In your meeting app, pick Translator Mic
+                In your meeting app, pick Interpreter Mic
               </h1>
               <p style={css({ fontSize: 14, color: "var(--txt-2)", marginTop: 8, lineHeight: 1.5, maxWidth: 460 })}>
                 That's the virtual mic Intervox installed. It carries the translated voice.
@@ -817,7 +817,7 @@
                     })}></span>
                     <span>{sourceName}</span>
                   </div>
-                  <!-- FakeMicRow: Translator Mic (selected) -->
+                  <!-- FakeMicRow: Interpreter Mic (selected) -->
                   <div style={css({
                     display: "flex", alignItems: "center", gap: 10,
                     padding: "8px 10px",
@@ -835,7 +835,7 @@
                     })}>
                       <Check size={9} color="#fff" />
                     </span>
-                    <span>Translator Mic</span>
+                    <span>Interpreter Mic</span>
                     <span style={css({ marginLeft: "auto" })}>
                       <span style={css({ fontSize: 10.5, color: "var(--c-accent)", fontWeight: 600 })}>Intervox</span>
                     </span>
@@ -862,7 +862,7 @@
               </div>
               <div style={css({ fontSize: 12, color: "var(--txt-3)", marginTop: 12, lineHeight: 1.5 })}>
                 Tip: keep your original mic selected as the *input device* in Intervox, and let
-                the meeting app use Translator Mic. The two don't compete.
+                the meeting app use Interpreter Mic. The two don't compete.
               </div>
             </div>
           {/if}

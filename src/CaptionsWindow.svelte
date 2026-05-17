@@ -20,7 +20,7 @@
   const isTranslating = $derived(store.isTranslating);
   const isPass = $derived(store.mode === "pass" && !store.lastError);
   const isSilence = $derived(store.mode === "silence" && !store.lastError);
-  const showSource = $derived(store.config?.captions.show_source ?? true);
+  const showSource = $derived(store.config?.captions.show_source ?? false);
   const showTarget = $derived(store.config?.captions.show_target ?? true);
 
   const status = $derived(
@@ -31,14 +31,14 @@
         : isPass
           ? { dot: "oklch(0.62 0.165 245)", text: "Pass-through · Original source only" }
           : store.mixPercent > 0
-            ? { dot: "oklch(0.66 0.155 155)", text: `${store.langPairText} · Translation + original ${store.mixPercent}% · ${store.latencyText}` }
-            : { dot: "oklch(0.66 0.155 155)", text: `${store.langPairText} · Translating · ${store.latencyText}` }
+            ? { dot: "oklch(0.66 0.155 155)", text: `${store.langPairText} · Interpreting + original ${store.mixPercent}% · ${store.latencyText}` }
+            : { dot: "oklch(0.66 0.155 155)", text: `${store.langPairText} · Interpreting · ${store.latencyText}` }
   );
 
   const errorMsgs: Record<string, { t: string; s: string }> = {
-    network: { t: "Connection lost", s: "Translator Mic is sending silence while Intervox reconnects." },
+    network: { t: "Connection lost", s: "Interpreter Mic is sending silence while Intervox reconnects." },
     mic: { t: "No audio is coming from your source", s: "Check that the right input source is selected in Audio settings." },
-    driver: { t: "Translator Mic isn't installed", s: "Install the audio driver so meeting apps can see the virtual mic." },
+    driver: { t: "Interpreter Mic isn't installed", s: "Install the audio driver so meeting apps can see the virtual mic." },
     permission: { t: "Audio permission missing", s: "Grant the required audio access in System Settings." },
   };
 
@@ -264,7 +264,7 @@
         <div class="caption-line state-line">
           <div class="caption-label">Status</div>
           <div class="caption-text" style={css({ fontSize: base, lineHeight: 1.32 })}>
-            <strong>Translation off</strong>
+            <strong>Interpretation off</strong>
             <span class="state-detail">No audio is being sent.</span>
           </div>
         </div>

@@ -75,11 +75,11 @@ docs/DEVELOPMENT.md    Local setup, driver lifecycle, and verification commands.
 | Real VU meter events | RMS computed per capture block; `input-level` and `output-level` events emitted to frontend. |
 | PassThrough path | Mic-to-ring path: capture → resample 48 kHz → write `/intervox.ring`. |
 | OpenAI Realtime connection | BYOK WebSocket session with exponential-backoff reconnect; session.update sent on connect. |
-| Translate path | Mic → 24 kHz PCM16 → WebSocket uplink → translated audio delta → jitter buffer → resample 48 kHz → limiter → ring. |
-| Translate original-voice mix | Translate path plus delayed original mixed under translated audio when `original_voice_percent > 0`. |
+| Interpret path | Mic → 24 kHz PCM16 → WebSocket uplink → translated audio delta → jitter buffer → resample 48 kHz → limiter → ring. |
+| Interpret original-voice mix | Interpret path plus delayed original mixed under translated audio when `original_voice_percent > 0`. |
 | Transcript events | Source and target transcript deltas forwarded to frontend via dedicated transcript events; completion events finalize saved segments. |
 | Latency events | Round-trip latency computed and emitted via `latency-updated` event. |
-| Silence mode enforcement | OpenAI session torn down in Silence and PassThrough; no original leakage in Translate. |
+| Silence mode enforcement | OpenAI session torn down in Silence and PassThrough; no original leakage in Interpret. |
 | Virtual mic available after quit | Ring buffer mode set to Silence on app exit; driver continues to serve silence. |
 | Engine supervisor | Async supervisor restarts the live engine on error with mode-aware logic. |
 
@@ -256,13 +256,13 @@ operator after completing the runbook; they are NOT checked here.
 - [x] Resample translated audio to 48 kHz.
 - [x] Feed translated audio into jitter buffer.
 - [x] Write translated output to `/intervox.ring`.
-- [x] Implement Translate delayed original path when original voice volume is above 0%.
+- [x] Implement Interpret delayed original path when original voice volume is above 0%.
 - [x] Mix delayed original under translated audio.
 - [x] Enforce limiter on final virtual mic output.
 - [x] Emit real output-level events.
 - [x] Emit real latency events.
 - [x] Stop OpenAI session in Silence and PassThrough.
-- [x] Prevent original mic leakage in Translate mode.
+- [x] Prevent original mic leakage in Interpret mode.
 - [x] Keep virtual mic available and silent when app quits.
 
 ### Product Acceptance

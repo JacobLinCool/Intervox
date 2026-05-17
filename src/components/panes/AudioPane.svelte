@@ -96,7 +96,7 @@
       title="Mirror to speakers"
       sub={noOutputDevices
         ? "No macOS output device is available."
-        : `Plays the same audio sent to Translator Mic through ${defaultOutputName}.`}
+        : `Plays the same audio sent to Interpreter Mic through ${defaultOutputName}.`}
     />
     <span style={css({ marginLeft: "auto", display: "flex", alignItems: "center" })}>
       <Toggle
@@ -131,7 +131,7 @@
 
 <FieldGroup
   title="Virtual Microphone"
-  hint="Select Translator Mic as your microphone in Zoom, Google Meet, Teams, or Discord."
+  hint="Select Interpreter Mic as your microphone in Zoom, Google Meet, Teams, or Discord."
 >
   <Row last>
     <div
@@ -149,7 +149,7 @@
       <SysIcon name="mic" size={20} />
     </div>
     <div style={css({ flex: 1 })}>
-      <div style={css({ fontSize: 13, fontWeight: 500 })}>Translator Mic</div>
+      <div style={css({ fontSize: 13, fontWeight: 500 })}>Interpreter Mic</div>
       <div style={css({ fontSize: 11.5, color: "var(--txt-3)", marginTop: 1 })}>
         {#if store.status?.virtualMicInstalled}
           Virtual audio device · installed

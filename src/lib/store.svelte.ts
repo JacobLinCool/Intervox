@@ -111,11 +111,11 @@ export function connectionChip(
   latencyText: string,
   errorTitle: string | null,
 ): ChipView {
-  if (mode === "silence") return { tone: "neutral", text: "Translation off" };
+  if (mode === "silence") return { tone: "neutral", text: "Interpretation off" };
   if (mode === "pass") return { tone: "neutral", text: "Pass-through · no translation" };
   switch (conn) {
     case "connected":
-      return { tone: "ok", text: `Translating · connected · ${latencyText}` };
+      return { tone: "ok", text: `Interpreting · connected · ${latencyText}` };
     case "idle":
     case "connecting":
       return { tone: "warn", text: "Connecting to OpenAI…" };

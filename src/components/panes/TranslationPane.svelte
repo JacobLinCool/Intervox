@@ -28,8 +28,8 @@
 {/snippet}
 
 <PaneTitle
-  title="Translation"
-  sub="Language and latency settings for translated speech."
+  title="Interpretation"
+  sub="Language and latency settings for interpreted speech."
 />
 
 {#snippet langLeft(o: { value: string; label: string })}
@@ -166,7 +166,7 @@
       title="Original voice volume"
       sub={store.mode === "translate"
         ? "0% sends translated speech only; higher values keep your voice underneath."
-        : "Available when Translator Mic is in Translate mode."}
+        : "Available when Interpreter Mic is in Interpret mode."}
     />
     <div
       style={css({

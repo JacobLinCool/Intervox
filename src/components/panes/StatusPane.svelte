@@ -57,7 +57,7 @@
         : null,
       {
         ok: virtualMicOk,
-        label: "Translator Mic installed",
+        label: "Interpreter Mic installed",
         failLabel: driverStateLabel,
         cta: store.driverState === "installedNotRunning" || store.driverState === "stale"
           ? "Reinstall Driver"
@@ -115,7 +115,7 @@
       {
         ok: true,
         instruction: true,
-        label: "Select Translator Mic in your meeting app's microphone settings.",
+        label: "Select Interpreter Mic in your meeting app's microphone settings.",
       },
     ].filter(Boolean) as typeof rows;
 
@@ -184,9 +184,9 @@
         })}
       >
         {hasError
-          ? "Translation paused"
+          ? "Interpretation paused"
           : isTranslating
-            ? `Translating ${store.langPairText}`
+            ? `Interpreting ${store.langPairText}`
             : meta.label}
       </div>
       <div
@@ -383,7 +383,7 @@
             background: "rgba(120,120,128,0.10)",
           })}
         >
-          Translator Mic
+          Interpreter Mic
         </span>
       {/if}
     </Row>

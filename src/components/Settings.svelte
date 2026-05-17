@@ -15,7 +15,7 @@
     { id: "status",      label: "Status",      tint: "var(--c-accent)" },
     { id: "account",     label: "Account",     tint: "var(--c-accent)" },
     { id: "audio",       label: "Audio",       tint: "var(--c-pass)" },
-    { id: "translation", label: "Translation", tint: "var(--c-translate)" },
+    { id: "translation", label: "Interpretation", tint: "var(--c-translate)" },
     { id: "captions",    label: "Captions",    tint: "var(--c-accent)" },
     { id: "shortcuts",   label: "Shortcuts",   tint: "var(--c-silence)" },
     { id: "privacy",     label: "Privacy",     tint: "var(--c-translate)" },

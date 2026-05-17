@@ -420,7 +420,7 @@ pub fn run() {
             let mode_translate = CheckMenuItem::with_id(
                 app,
                 "mode_translate",
-                "Translate",
+                "Interpret",
                 true,
                 checks[2],
                 None::<&str>,

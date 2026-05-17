@@ -142,7 +142,7 @@ pub fn tray_mode_label(mode: VirtualMicMode) -> &'static str {
     match mode {
         VirtualMicMode::Silence => "Silence",
         VirtualMicMode::PassThrough => "Pass-Through",
-        VirtualMicMode::Translate => "Translate",
+        VirtualMicMode::Translate => "Interpret",
     }
 }
 
@@ -913,7 +913,7 @@ mod tests {
     fn tray_mode_label_stable() {
         assert_eq!(tray_mode_label(VirtualMicMode::Silence), "Silence");
         assert_eq!(tray_mode_label(VirtualMicMode::PassThrough), "Pass-Through");
-        assert_eq!(tray_mode_label(VirtualMicMode::Translate), "Translate");
+        assert_eq!(tray_mode_label(VirtualMicMode::Translate), "Interpret");
     }
 
     // ── tray_menu_checks ──────────────────────────────────────────────────────

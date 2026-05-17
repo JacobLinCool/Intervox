@@ -1,16 +1,16 @@
 # Intervox
 
-Intervox is a macOS desktop app that translates live speech and exposes the
-result as a virtual microphone for any apps.
+Intervox is a macOS desktop app that interprets live speech and exposes the
+translated voice as a virtual microphone for any apps.
 
 Speak normally. Intervox listens through your real microphone, translates what
-you say, and makes the translated voice available as **Translator Mic**. Zoom,
+you say, and makes the translated voice available as **Interpreter Mic**. Zoom,
 Google Meet, QuickTime, and any app that can choose a microphone can use it like
 a regular input device.
 
 ## What It Does
 
-- Translates live speech into a virtual microphone.
+- Interprets live speech and sends the translated voice through a virtual microphone.
 - Lets meeting apps hear the translated voice instead of the original mic.
 - Supports silence, pass-through, translated voice, and translated voice mixed
   with the original.
@@ -23,7 +23,7 @@ Intervox runs as a Tauri desktop app with a small macOS audio driver. The app
 captures a selected microphone, sends speech to OpenAI Realtime with the user's
 own API key, receives translated audio, and writes it to the virtual microphone.
 
-The product name shown in the UI is **Translator Mic**. macOS and some audio
+The product name shown in the UI is **Interpreter Mic**. macOS and some audio
 selectors may show the underlying device as **Intervox**.
 
 ## Status

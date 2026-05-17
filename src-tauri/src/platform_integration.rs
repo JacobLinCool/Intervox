@@ -84,11 +84,11 @@ mod tests {
 
     #[test]
     fn tray_title_appends_badge_only_when_enabled_and_present() {
-        assert_eq!(tray_title("Translate", false, Some(1200)), "Translate");
-        assert_eq!(tray_title("Translate", true, None), "Translate");
+        assert_eq!(tray_title("Interpret", false, Some(1200)), "Interpret");
+        assert_eq!(tray_title("Interpret", true, None), "Interpret");
         assert_eq!(
-            tray_title("Translate", true, Some(1180)),
-            "Translate · 1.2s"
+            tray_title("Interpret", true, Some(1180)),
+            "Interpret · 1.2s"
         );
     }
 }

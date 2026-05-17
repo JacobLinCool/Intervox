@@ -10,7 +10,7 @@ export const MODES: { id: UiMode; label: string; color: string; short: string; b
     label: "Silence",
     color: "var(--c-silence)",
     short: "No audio is sent",
-    body: "No audio is sent through Translator Mic.",
+    body: "No audio is sent through Interpreter Mic.",
   },
   {
     id: "pass",
@@ -21,10 +21,10 @@ export const MODES: { id: UiMode; label: string; color: string; short: string; b
   },
   {
     id: "translate",
-    label: "Translate",
+    label: "Interpret",
     color: "var(--c-translate)",
-    short: "Translating",
-    body: "Translated speech and optional original voice is sent.",
+    short: "Interpreting",
+    body: "Translated speech and optional original voice are sent.",
   },
 ];
 
