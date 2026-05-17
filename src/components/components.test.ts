@@ -163,7 +163,7 @@ import AdvancedPane from "./panes/AdvancedPane.svelte";
 import { render as r5 } from "@testing-library/svelte";
 describe("remaining panes", () => {
   it("Captions/Shortcuts/Privacy/Advanced render", () => {
-    expect(r5(CaptionsPane as any).container.innerHTML).toContain("Floating captions");
+    expect(r5(CaptionsPane as any).container.innerHTML).toContain("Captions window");
     expect(r5(ShortcutsPane as any).container.innerHTML).toContain("Global Shortcuts");
     expect(r5(PrivacyPane as any).container.innerHTML).toContain("How translation works");
     const advHtml = r5(AdvancedPane as any).container.innerHTML;
@@ -208,18 +208,6 @@ describe("AdvancedPane clear history", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(called).toBe(true);
     store.clearHistory = original;
-  });
-});
-
-import Captions from "./Captions.svelte";
-import { render as r7 } from "@testing-library/svelte";
-describe("Captions honest", () => {
-  it("hidden when captionsOpen false (default), no fake transcript text", () => {
-    const { container } = r7(Captions as any);
-    expect(container.querySelector("[data-captions]")).toBeNull();
-    // none of the prototype fake lines ever appear
-    expect(container.innerHTML).not.toContain("我覺得這個功能下週可以開始實作");
-    expect(container.innerHTML).not.toContain("start implementing this feature next week");
   });
 });
 
@@ -309,10 +297,17 @@ describe("CaptionsWindow", () => {
     expect(container.innerHTML).toContain("Waiting for translation");
   });
 
-  it("does not show source block when srcText is empty", () => {
+  it("renders compact source placeholder as the second caption line", () => {
     const { container } = rCW(CaptionsWindow as any);
-    // No "Original" label rendered when srcText is empty
-    expect(container.innerHTML).not.toContain("Original");
+    expect(container.innerHTML).toContain("Waiting for speech");
+    expect(container.querySelector(".compact")).not.toBeNull();
+  });
+
+  it("toggles expanded layout from the caption window control", async () => {
+    const { container, getByLabelText } = rCW(CaptionsWindow as any);
+    expect(container.querySelector(".compact")).not.toBeNull();
+    await fireEvent.click(getByLabelText("Expand captions"));
+    expect(container.querySelector(".expanded")).not.toBeNull();
   });
 });
 

@@ -2,40 +2,22 @@
   import { store } from "$lib/store.svelte";
   import { PaneTitle, FieldGroup, Row, RowLabel, Toggle, Segmented } from "$lib/controls";
   import { css } from "$lib/util";
-
-  const captionsEnabled = $derived(store.config?.captions.enabled ?? false);
 </script>
 
 <PaneTitle
   title="Captions"
-  sub="A small overlay window that floats above your meeting, showing both transcripts."
+  sub="A compact always-on-top transcript window for meetings."
 />
 
 <FieldGroup title="Visibility">
   <Row>
-    <RowLabel title="Floating captions" sub="Show the always-on-top transcript window." />
+    <RowLabel title="Captions window" sub="Show the compact always-on-top transcript window." />
     <span style={css({ marginLeft: "auto" })}>
       <Toggle
-        ariaLabel="Toggle floating captions"
-        value={store.config?.captions.enabled ?? store.captionsOpen}
+        ariaLabel="Toggle captions window"
+        value={store.config?.captions.enabled ?? false}
         onChange={(v) => store.setCaptions({ enabled: v })}
         tint="var(--c-accent)"
-      />
-    </span>
-  </Row>
-  <Row>
-    <RowLabel
-      title="Pop-out captions window"
-      sub={captionsEnabled
-        ? "Open a dedicated always-on-top captions window."
-        : "Enable floating captions above to use the pop-out window."}
-    />
-    <span style={css({ marginLeft: "auto", opacity: captionsEnabled ? 1 : 0.35, pointerEvents: captionsEnabled ? "auto" : "none" })}>
-      <Toggle
-        ariaLabel="Toggle pop-out captions window"
-        value={store.captionsWindowOpen}
-        onChange={() => store.toggleCaptionsWindow()}
-        tint="var(--c-translate)"
       />
     </span>
   </Row>

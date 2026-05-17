@@ -180,8 +180,6 @@ class Store {
 
   // UI-nav flags
   settingsTab: string = $state("status");
-  captionsOpen: boolean = $state(false);
-  captionsWindowOpen: boolean = $state(false);
   onboardingOpen: boolean = $state(false);
 
 
@@ -222,7 +220,6 @@ class Store {
       this.driverState = driverState;
       this.applyLevels(status.inputLevel, status.outputLevel);
 
-      this.captionsOpen = config.captions.enabled;
       this.onboardingOpen = !config.onboarding_completed;
       this.settingsTab = "status";
     } catch (e: unknown) {
@@ -293,6 +290,9 @@ class Store {
       this.tgtText = s;
     }));
     install("devices", () => on.devices((d) => { this.devices = d; }));
+    install("captions-config", () => on.captionsConfig((captions) => {
+      if (this.config) this.config = { ...this.config, captions };
+    }));
     install("error", () => on.error((e) => { this.lastError = e; }));
     // transcript-cleared: the Rust clear_transcript_history command has already
     // ended the active session log and deleted the on-disk JSONL files; this
@@ -579,7 +579,10 @@ class Store {
     const ok = await this.tryCmd(() => cmd.setCaptionsConfig(next));
     if (!ok) return;
     this.config.captions = next;
-    this.captionsOpen = next.enabled;
+  }
+
+  async setCaptionsWindowExpanded(expanded: boolean): Promise<void> {
+    await this.tryCmd(() => cmd.setCaptionsWindowExpanded(expanded));
   }
 
   async setPrivacy(patch: Partial<Config["privacy"]>): Promise<void> {
@@ -804,28 +807,9 @@ class Store {
 
   // UI setters
   setSettingsTab(t: string): void { this.settingsTab = t; }
-  setCaptionsOpen(b: boolean): void { this.captionsOpen = b; }
   setOnboardingOpen(b: boolean): void { this.onboardingOpen = b; }
   setTheme(t: "light" | "dark"): void { this.theme = t; }
   setWallpaper(w: string): void { this.wallpaper = w; }
-
-  async openCaptionsWindow(): Promise<void> {
-    const ok = await this.tryCmd(() => cmd.openCaptionsWindow());
-    if (ok) this.captionsWindowOpen = true;
-  }
-
-  async closeCaptionsWindow(): Promise<void> {
-    const ok = await this.tryCmd(() => cmd.closeCaptionsWindow());
-    if (ok) this.captionsWindowOpen = false;
-  }
-
-  async toggleCaptionsWindow(): Promise<void> {
-    if (this.captionsWindowOpen) {
-      await this.closeCaptionsWindow();
-    } else {
-      await this.openCaptionsWindow();
-    }
-  }
 
   quit(): void { void cmd.quitApp(); }
 

@@ -24,7 +24,7 @@ export const MODES: { id: UiMode; label: string; color: string; short: string; b
     label: "Translate",
     color: "var(--c-translate)",
     short: "Translating",
-    body: "Translated speech is sent. Original voice volume is controlled in Translation.",
+    body: "Translated speech and optional original voice is sent.",
   },
 ];
 

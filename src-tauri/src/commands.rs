@@ -1055,11 +1055,12 @@ pub fn set_mix_percent(
 }
 
 #[tauri::command]
-pub fn set_captions_config(c: CaptionsConfig, h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    update_config(&h, |cfg| {
-        cfg.captions = c;
-    })?;
-    Ok(())
+pub fn set_captions_config(
+    c: CaptionsConfig,
+    app: tauri::AppHandle,
+    h: tauri::State<AppHandle>,
+) -> Result<(), AppError> {
+    apply_captions_config(&app, &h, c)
 }
 
 #[tauri::command]
@@ -1098,57 +1099,137 @@ pub fn open_accessibility_settings() {
 }
 
 #[tauri::command]
-pub fn complete_onboarding(h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    update_config(&h, |cfg| {
+pub fn complete_onboarding(
+    app: tauri::AppHandle,
+    h: tauri::State<AppHandle>,
+) -> Result<(), AppError> {
+    let cfg = update_config(&h, |cfg| {
         cfg.onboarding_completed = true;
     })?;
+    open_initial_captions_window(&app, &cfg.captions);
     Ok(())
 }
 
 // ── Captions window commands ─────────────────────────────────────────────────
 
-/// Inner helper — open or show the captions window. Can be called from both
-/// the `#[tauri::command]` and the tray `on_menu_event` closure.
-///
-/// If the `captions` webview window already exists, shows + refocuses it and
-/// refreshes the `always_on_top` flag from `always_on_top`.  Otherwise builds
-/// a new window:
-///   • label "captions" → loads dist/captions.html
-///   • `decorations(false)` — no OS chrome
-///   • `always_on_top(always_on_top)` — from config
-///   • `transparent(true)` — requires `macOSPrivateApi: true` in tauri.conf.json
-///   • `skip_taskbar(true)` — not in the dock/taskbar
-///   • 520 × 200 initial size, resizable
-///   • immediately visible
-pub fn do_open_captions_window(
+const CAPTIONS_WINDOW_WIDTH: f64 = 640.0;
+const CAPTIONS_COMPACT_HEIGHT: f64 = 136.0;
+const CAPTIONS_EXPANDED_HEIGHT: f64 = 278.0;
+const CAPTIONS_MIN_WIDTH: f64 = 420.0;
+const CAPTIONS_MAX_WIDTH: f64 = 920.0;
+
+fn emit_captions_config_changed(app: &tauri::AppHandle, captions: &CaptionsConfig) {
+    use tauri::Emitter as _;
+    let _ = app.emit("captions-config-changed", captions.clone());
+}
+
+fn ensure_captions_window(
     app: &tauri::AppHandle,
     always_on_top: bool,
+    focus_existing: bool,
 ) -> Result<(), AppError> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
     if let Some(win) = app.get_webview_window("captions") {
-        // Window already exists — just show, focus, and refresh always_on_top.
         let _ = win.set_always_on_top(always_on_top);
         let _ = win.show();
-        let _ = win.set_focus();
-    } else {
-        WebviewWindowBuilder::new(app, "captions", WebviewUrl::App("captions.html".into()))
-            .title("")
-            .decorations(false)
-            .always_on_top(always_on_top)
-            .transparent(true)
-            .skip_taskbar(true)
-            .inner_size(520.0, 200.0)
-            .resizable(true)
-            .visible(true)
-            .build()
-            .map_err(|e| AppError::internal(format!("captions window: {e}")))?;
+        if focus_existing {
+            let _ = win.set_focus();
+        }
+        return Ok(());
     }
+
+    WebviewWindowBuilder::new(app, "captions", WebviewUrl::App("captions.html".into()))
+        .title("")
+        .decorations(false)
+        .always_on_top(always_on_top)
+        .transparent(true)
+        .skip_taskbar(true)
+        .inner_size(CAPTIONS_WINDOW_WIDTH, CAPTIONS_COMPACT_HEIGHT)
+        .min_inner_size(CAPTIONS_MIN_WIDTH, CAPTIONS_COMPACT_HEIGHT)
+        .max_inner_size(CAPTIONS_MAX_WIDTH, CAPTIONS_EXPANDED_HEIGHT)
+        .resizable(true)
+        .visible(true)
+        .build()
+        .map_err(|e| AppError::internal(format!("captions window: {e}")))?;
+    Ok(())
+}
+
+fn sync_captions_window(
+    app: &tauri::AppHandle,
+    captions: &CaptionsConfig,
+    focus_existing: bool,
+) -> Result<(), AppError> {
+    if captions.enabled {
+        ensure_captions_window(app, captions.always_on_top, focus_existing)
+    } else {
+        do_close_captions_window(app)
+    }
+}
+
+fn apply_captions_config(
+    app: &tauri::AppHandle,
+    h: &AppHandle,
+    captions: CaptionsConfig,
+) -> Result<(), AppError> {
+    let previous = h.config.lock().unwrap().captions.clone();
+    let focus_existing = captions.enabled && !previous.enabled;
+
+    update_config(h, |cfg| {
+        cfg.captions = captions.clone();
+    })?;
+
+    if let Err(error) = sync_captions_window(app, &captions, focus_existing) {
+        let _ = update_config(h, |cfg| {
+            cfg.captions = previous.clone();
+        });
+        emit_captions_config_changed(app, &previous);
+        return Err(error);
+    }
+
+    emit_captions_config_changed(app, &captions);
+    Ok(())
+}
+
+fn set_captions_enabled(
+    app: &tauri::AppHandle,
+    h: &AppHandle,
+    enabled: bool,
+) -> Result<(), AppError> {
+    let mut captions = h.config.lock().unwrap().captions.clone();
+    captions.enabled = enabled;
+    apply_captions_config(app, h, captions)
+}
+
+pub fn toggle_captions_window(app: &tauri::AppHandle, h: &AppHandle) -> Result<(), AppError> {
+    let enabled = h.config.lock().unwrap().captions.enabled;
+    set_captions_enabled(app, h, !enabled)
+}
+
+pub fn open_initial_captions_window(app: &tauri::AppHandle, captions: &CaptionsConfig) {
+    if captions.enabled {
+        let _ = ensure_captions_window(app, captions.always_on_top, false);
+    }
+}
+
+pub fn record_captions_window_closed(
+    app: &tauri::AppHandle,
+    h: &AppHandle,
+) -> Result<(), AppError> {
+    let mut captions = h.config.lock().unwrap().captions.clone();
+    if !captions.enabled {
+        return Ok(());
+    }
+    captions.enabled = false;
+    update_config(h, |cfg| {
+        cfg.captions = captions.clone();
+    })?;
+    emit_captions_config_changed(app, &captions);
     Ok(())
 }
 
 /// Inner helper — close the captions window. Silently succeeds if absent.
-pub fn do_close_captions_window(app: &tauri::AppHandle) -> Result<(), AppError> {
+fn do_close_captions_window(app: &tauri::AppHandle) -> Result<(), AppError> {
     use tauri::Manager;
     if let Some(win) = app.get_webview_window("captions") {
         win.close()
@@ -1157,20 +1238,42 @@ pub fn do_close_captions_window(app: &tauri::AppHandle) -> Result<(), AppError> 
     Ok(())
 }
 
-/// Tauri command: open the dedicated always-on-top captions window.
 #[tauri::command]
-pub fn open_captions_window(
-    app: tauri::AppHandle,
-    h: tauri::State<AppHandle>,
-) -> Result<(), AppError> {
-    let always_on_top = h.config.lock().unwrap().captions.always_on_top;
-    do_open_captions_window(&app, always_on_top)
+pub fn set_captions_window_expanded(expanded: bool, app: tauri::AppHandle) -> Result<(), AppError> {
+    use tauri::{LogicalSize, Manager};
+
+    if let Some(win) = app.get_webview_window("captions") {
+        let current_width = win
+            .inner_size()
+            .ok()
+            .and_then(|size| {
+                win.scale_factor()
+                    .ok()
+                    .map(|scale| size.to_logical::<f64>(scale).width)
+            })
+            .unwrap_or(CAPTIONS_WINDOW_WIDTH)
+            .clamp(CAPTIONS_MIN_WIDTH, CAPTIONS_MAX_WIDTH);
+        let height = if expanded {
+            CAPTIONS_EXPANDED_HEIGHT
+        } else {
+            CAPTIONS_COMPACT_HEIGHT
+        };
+        win.set_size(LogicalSize::new(current_width, height))
+            .map_err(|e| AppError::internal(format!("resize captions: {e}")))?;
+    }
+    Ok(())
 }
 
-/// Tauri command: close (destroy) the dedicated captions window.
 #[tauri::command]
-pub fn close_captions_window(app: tauri::AppHandle) -> Result<(), AppError> {
-    do_close_captions_window(&app)
+pub fn start_captions_window_drag(app: tauri::AppHandle) -> Result<(), AppError> {
+    use tauri::Manager;
+
+    let win = app
+        .get_webview_window("captions")
+        .ok_or_else(|| AppError::internal("captions window not found"))?;
+    win.start_dragging()
+        .map_err(|e| AppError::internal(format!("drag captions: {e}")))?;
+    Ok(())
 }
 
 #[tauri::command]

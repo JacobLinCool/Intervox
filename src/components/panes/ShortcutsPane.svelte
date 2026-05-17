@@ -151,7 +151,7 @@
   <Row last>
     <RowLabel
       title="Show / Hide Captions"
-      sub="Toggle the floating captions window"
+      sub="Toggle the captions window"
       width={220}
     />
     <span style={css({ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" })}>

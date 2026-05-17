@@ -198,11 +198,9 @@ fn execute_shortcut_action(app: &tauri::AppHandle, action: ShortcutAction) {
             }
         }
         ShortcutAction::Captions => {
-            if app.get_webview_window("captions").is_some() {
-                let _ = crate::commands::do_close_captions_window(app);
-            } else {
-                let always_on_top = h.config.lock().unwrap().captions.always_on_top;
-                let _ = crate::commands::do_open_captions_window(app, always_on_top);
+            if let Err(e) = crate::commands::toggle_captions_window(app, &h) {
+                use tauri::Emitter as _;
+                let _ = app.emit("error", e);
             }
         }
     }

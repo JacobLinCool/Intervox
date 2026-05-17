@@ -129,6 +129,9 @@ export const cmd = {
   setTargetLanguage: (language: string) => invoke("set_target_language", { language }),
   setMixPercent: (percent: number) => invoke("set_mix_percent", { percent }),
   setCaptionsConfig: (c: Config["captions"]) => invoke("set_captions_config", { c }),
+  setCaptionsWindowExpanded: (expanded: boolean) =>
+    invoke("set_captions_window_expanded", { expanded }),
+  startCaptionsWindowDrag: () => invoke("start_captions_window_drag"),
   setPrivacyConfig: (p: Config["privacy"]) => invoke("set_privacy_config", { p }),
   setShortcuts: (s: Config["shortcuts"]) => invoke("set_shortcuts", { s }),
   setApiKey: (key: string) => invoke<AccountStatus>("set_api_key", { key }),
@@ -156,8 +159,6 @@ export const cmd = {
   completeOnboarding: () => invoke("complete_onboarding"),
   quitApp: () => invoke("quit_app"),
   setMixSettings: (settings: MixSettings) => invoke("set_mix_settings", { settings }),
-  openCaptionsWindow: () => invoke("open_captions_window"),
-  closeCaptionsWindow: () => invoke("close_captions_window"),
   openAccessibilitySettings: () => invoke("open_accessibility_settings"),
 };
 export const on = {
@@ -173,6 +174,8 @@ export const on = {
     listen<{ text: string }>("target-transcript-delta", (e) => f(e.payload.text)),
   devices: (f: (d: AudioDevices) => void) =>
     listen<AudioDevices>("device-list-changed", (e) => f(e.payload)),
+  captionsConfig: (f: (c: Config["captions"]) => void) =>
+    listen<Config["captions"]>("captions-config-changed", (e) => f(e.payload)),
   error: (f: (err: AppError) => void) => listen<AppError>("error", (e) => f(e.payload)),
   transcriptCleared: (f: () => void) => listen("transcript-cleared", () => f()),
 };

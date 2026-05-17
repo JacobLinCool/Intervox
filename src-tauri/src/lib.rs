@@ -487,15 +487,10 @@ pub fn run() {
 
                         // ── Captions ─────────────────────────────────────────
                         "captions" => {
-                            // Toggle the dedicated always-on-top captions window.
-                            // If it is currently open, close it; otherwise open it.
-                            use tauri::Manager;
-                            if app.get_webview_window("captions").is_some() {
-                                let _ = commands::do_close_captions_window(app);
-                            } else {
-                                let h = app.state::<commands::AppHandle>();
-                                let always_on_top = h.config.lock().unwrap().captions.always_on_top;
-                                let _ = commands::do_open_captions_window(app, always_on_top);
+                            let h = app.state::<commands::AppHandle>();
+                            if let Err(e) = commands::toggle_captions_window(app, &h) {
+                                use tauri::Emitter as _;
+                                let _ = app.emit("error", e);
                             }
                         }
 
@@ -581,6 +576,10 @@ pub fn run() {
             // ── Global shortcuts ──────────────────────────────────────────────
             crate::shortcuts::register_shortcuts(app.handle());
 
+            if cfg.onboarding_completed {
+                commands::open_initial_captions_window(app.handle(), &cfg.captions);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -616,11 +615,11 @@ pub fn run() {
             commands::clear_api_key,
             commands::set_mix_percent,
             commands::set_captions_config,
+            commands::set_captions_window_expanded,
+            commands::start_captions_window_drag,
             commands::set_privacy_config,
             commands::set_shortcuts,
             commands::complete_onboarding,
-            commands::open_captions_window,
-            commands::close_captions_window,
             commands::quit_app,
             commands::open_accessibility_settings,
             commands::get_connection_log,
@@ -650,6 +649,16 @@ pub fn run() {
                 if let Some(win) = app_handle.get_webview_window("main") {
                     let _ = win.hide();
                 }
+            }
+
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { .. },
+                ..
+            } if label == "captions" => {
+                use tauri::Manager as _;
+                let h = app_handle.state::<commands::AppHandle>();
+                let _ = commands::record_captions_window_closed(app_handle, &h);
             }
 
             #[cfg(target_os = "macos")]

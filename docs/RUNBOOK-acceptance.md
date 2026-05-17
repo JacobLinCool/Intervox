@@ -219,7 +219,7 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 **Action.**
 1. With the app in **Translate** mode and an active OpenAI session.
 2. Open the dedicated captions window via one of:
-   - **Captions** pane > "Pop-out captions window" toggle (enable the "Floating captions" toggle first, then toggle "Pop-out captions window").
+   - **Captions** pane > "Captions window" toggle.
    - Tray menu > **Captions**.
    - Global shortcut **Cmd+Shift+C**.
 3. Speak a sentence in the source language.

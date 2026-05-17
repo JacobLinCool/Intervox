@@ -3,7 +3,6 @@
   import { invoke } from "@tauri-apps/api/core";
   import { store } from "$lib/store.svelte";
   import Settings from "./components/Settings.svelte";
-  import Captions from "./components/Captions.svelte";
   import Onboarding from "./components/Onboarding.svelte";
   import Toast from "./components/Toast.svelte";
   import { css } from "$lib/util";
@@ -54,10 +53,6 @@
 <div class="stage">
   <Settings />
   <Toast />
-
-  {#if store.captionsOpen && !store.onboardingOpen}
-    <Captions />
-  {/if}
 
   {#if store.onboardingOpen}
     <Onboarding />
