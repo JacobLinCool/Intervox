@@ -225,6 +225,7 @@ fn resolved_device_name(device: &cpal::Device) -> String {
 /// 3. Resamples to `TARGET_HZ` with the stateful `LinearResampler`.
 /// 4. Computes level and stores `rms` bits into `level`.
 /// 5. `try_send`s the frame — drops on full/disconnected (never blocks).
+#[allow(clippy::too_many_arguments)]
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
