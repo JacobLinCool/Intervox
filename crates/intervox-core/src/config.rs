@@ -93,7 +93,7 @@ impl Default for CaptionsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            show_source: true,
+            show_source: false,
             show_target: true,
             font_size: "medium".into(),
             always_on_top: true,
