@@ -25,6 +25,7 @@
 
 pub mod capture;
 pub mod graph;
+pub mod playback;
 pub mod realtime;
 pub mod ring;
 pub mod supervisor;
@@ -41,6 +42,7 @@ use parking_lot::Mutex;
 use tauri::Emitter;
 
 use capture::{CaptureHandle, CapturedFrame};
+use playback::{PlaybackHandle, PlaybackSlot};
 use ring::{mode_to_ring_u32, RingProducer};
 use translate_chain::{SharedOriginalQueue, OPENAI_UPLINK_QUEUE_BOUND};
 
@@ -258,6 +260,10 @@ struct Inner {
     /// persisted UsageStore.  Stored so `shutdown()` can abort it before the
     /// final synchronous fold, preventing a double-write race.
     fold_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Whether local output preview is requested by config/UI.
+    output_preview_enabled: bool,
+    /// CPAL output stream that mirrors the final virtual-mic signal locally.
+    output_preview: Option<PlaybackHandle>,
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -314,6 +320,10 @@ pub struct Engine {
     /// (`Translate`, `Silence`, `PassThrough`) incur zero cost: the slot is
     /// `None` when not mixing.
     original_queue_slot: Arc<Mutex<Option<SharedOriginalQueue>>>,
+
+    /// Optional local output preview sink. Graph/pull paths clone the sender
+    /// under this short lock, then try_send outside the realtime audio stream.
+    output_preview_slot: PlaybackSlot,
 
     /// Process-wide counters for intentionally lossy audio backpressure paths.
     /// Updated from realtime capture/graph code with relaxed atomics only.
@@ -383,6 +393,8 @@ impl Engine {
             probe_capture: None,
             meter_task: None,
             fold_task: None,
+            output_preview_enabled: false,
+            output_preview: None,
         };
 
         // Start in Silence mode.
@@ -519,7 +531,7 @@ impl Engine {
             inner.fold_task = Some(fold_handle);
         }
 
-        Self {
+        let engine = Self {
             inner: Mutex::new(inner),
             ring,
             app,
@@ -533,6 +545,7 @@ impl Engine {
             mode_atomic: Arc::new(AtomicU32::new(mode_to_ring_u32(VirtualMicMode::Silence))),
             uplink_slot: Arc::new(Mutex::new(None)),
             original_queue_slot: Arc::new(Mutex::new(None)),
+            output_preview_slot: Arc::new(Mutex::new(None)),
             backpressure: backpressure_arc,
             last_send_time: Arc::new(Mutex::new(None)),
             audio_flowing: Arc::new(AtomicBool::new(false)),
@@ -545,7 +558,15 @@ impl Engine {
             show_latency_badge: Arc::new(std::sync::atomic::AtomicBool::new(
                 cfg.ui.show_latency_badge,
             )),
+        };
+
+        if cfg.audio.output_preview_enabled {
+            if let Err(error) = engine.set_output_preview_enabled(true) {
+                eprintln!("[engine] failed to restore output preview: {error}");
+            }
         }
+
+        engine
     }
 
     /// Returns a cloned `Arc` to the uplink sample counter so callers (e.g.
@@ -601,6 +622,7 @@ impl Engine {
 
         if routing.ring_silence {
             self.ring.flush_silence();
+            self.clear_output_preview();
             // Honest idle: reset both level atomics; the meter task pushes the
             // coherent zero frame on its next tick.
             self.publish_input_level_zero();
@@ -882,8 +904,10 @@ impl Engine {
             self.stop_openai_session_locked(&mut g);
             self.stop_capture_locked(&mut g);
             self.stop_level_probe_locked(&mut g);
+            self.stop_output_preview_locked(&mut g);
         }
         self.ring.flush_silence();
+        self.clear_output_preview();
         // Task 7: abort the 10 s fold task before the final synchronous fold so
         // there is no double-write race between the background ticker and the
         // shutdown flush below.
@@ -1004,6 +1028,93 @@ impl Engine {
             .store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Enable or disable local speaker preview for the final virtual-mic signal.
+    ///
+    /// Enabling opens the current macOS default output device. Failure leaves
+    /// preview disabled so the frontend can rollback its optimistic toggle.
+    pub fn set_output_preview_enabled(&self, enabled: bool) -> Result<(), AppError> {
+        if !enabled {
+            let mut g = self.inner.lock();
+            g.output_preview_enabled = false;
+            self.stop_output_preview_locked(&mut g);
+            return Ok(());
+        }
+
+        {
+            let mut g = self.inner.lock();
+            g.output_preview_enabled = true;
+            if g.output_preview.is_some() {
+                return Ok(());
+            }
+        }
+
+        let handle = match playback::start_default_output() {
+            Ok(handle) => handle,
+            Err(error) => {
+                let mut g = self.inner.lock();
+                g.output_preview_enabled = false;
+                self.stop_output_preview_locked(&mut g);
+                return Err(error);
+            }
+        };
+
+        let mut g = self.inner.lock();
+        if !g.output_preview_enabled {
+            drop(g);
+            handle.stop_in_background();
+            return Ok(());
+        }
+        self.install_output_preview_locked(&mut g, handle);
+        Ok(())
+    }
+
+    /// Reconcile preview with the current CoreAudio default output snapshot.
+    /// Called by the low-frequency device poll; failures keep preview requested
+    /// and are retried on the next poll.
+    pub fn sync_output_preview_default_device(&self, default_output_id: Option<&str>) {
+        let should_start = {
+            let mut g = self.inner.lock();
+            if !g.output_preview_enabled {
+                return;
+            }
+
+            match (g.output_preview.as_ref(), default_output_id) {
+                (_, None) => {
+                    self.stop_output_preview_locked(&mut g);
+                    false
+                }
+                (Some(handle), Some(device_id)) if handle.device_id() == device_id => false,
+                _ => {
+                    self.stop_output_preview_locked(&mut g);
+                    true
+                }
+            }
+        };
+
+        if !should_start {
+            return;
+        }
+
+        let Some(device_id) = default_output_id.map(str::to_string) else {
+            return;
+        };
+
+        match playback::start_default_output_for_device_id(device_id) {
+            Ok(handle) => {
+                let mut g = self.inner.lock();
+                if g.output_preview_enabled {
+                    self.install_output_preview_locked(&mut g, handle);
+                } else {
+                    drop(g);
+                    handle.stop_in_background();
+                }
+            }
+            Err(error) => {
+                eprintln!("[engine] failed to sync output preview: {error}");
+            }
+        }
+    }
+
     // ── Internal helpers (called with `inner` lock held) ──────────────────────
 
     fn publish_input_level_zero(&self) {
@@ -1014,6 +1125,23 @@ impl Engine {
     fn publish_output_level_zero(&self) {
         self.out_level.store(0, Ordering::Relaxed);
         self.output_level_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn clear_output_preview(&self) {
+        playback::clear_slot(&self.output_preview_slot);
+    }
+
+    fn install_output_preview_locked(&self, g: &mut Inner, handle: PlaybackHandle) {
+        self.stop_output_preview_locked(g);
+        *self.output_preview_slot.lock() = Some(handle.sender());
+        g.output_preview = Some(handle);
+    }
+
+    fn stop_output_preview_locked(&self, g: &mut Inner) {
+        *self.output_preview_slot.lock() = None;
+        if let Some(handle) = g.output_preview.take() {
+            handle.stop_in_background();
+        }
     }
 
     /// Start the OpenAI Realtime session.
@@ -1449,6 +1577,7 @@ impl Engine {
         let out_level_arc = Arc::clone(&self.out_level);
         let output_level_sequence = Arc::clone(&self.output_level_sequence);
         let jitter_pull = Arc::clone(&jitter);
+        let output_preview_slot = Arc::clone(&self.output_preview_slot);
         // Task 4.4: signals for latency emit.
         let pull_app = self.app.clone();
         let pull_audio_flowing = Arc::clone(&self.audio_flowing);
@@ -1522,6 +1651,7 @@ impl Engine {
                 // Write final block to ring (feeds the virtual mic driver at 48 kHz).
                 // This is a live path, so stale unread backlog is bounded.
                 ring_arc.write_live(&final_block);
+                playback::tap_slot(&output_preview_slot, &final_block);
                 // Update out_level from the FINAL block (mixed or limited).
                 let bits = translate_chain::rms_bits(&final_block);
                 out_level_arc.store(bits, Ordering::Relaxed);
@@ -1655,6 +1785,7 @@ impl Engine {
         // Honest idle: reset out_level to 0. The meter task owns the frontend
         // event stream and will publish the zero frame on the next tick.
         self.publish_output_level_zero();
+        self.clear_output_preview();
 
         // Task 4.4: reset latency signals — no stale data carries into the
         // next session.
@@ -1742,6 +1873,7 @@ impl Engine {
         let output_level_sequence = Arc::clone(&self.output_level_sequence);
         let uplink_slot = Arc::clone(&self.uplink_slot);
         let original_queue_slot = Arc::clone(&self.original_queue_slot);
+        let output_preview_slot = Arc::clone(&self.output_preview_slot);
         let graph_backpressure = Arc::clone(&self.backpressure);
         // Task 4.4: stamp the last-send time in the graph loop so
         // ev_task can compute openai_first_audio_ms.
@@ -1776,6 +1908,7 @@ impl Engine {
                             resampler: &mut resampler,
                             uplink_chunker: &mut uplink_chunker,
                             original_queue: oq.as_ref(),
+                            output_preview: &output_preview_slot,
                             backpressure: &graph_backpressure,
                         },
                     );
@@ -1961,6 +2094,7 @@ impl Engine {
         // delivery and will publish a coherent zero frame on the next tick.
         self.publish_input_level_zero();
         self.publish_output_level_zero();
+        self.clear_output_preview();
         lifecycle_trace(format!(
             "capture.stop_locked done elapsed_ms={}",
             started.elapsed().as_millis()

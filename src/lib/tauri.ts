@@ -82,7 +82,7 @@ export interface MixSettings {
 }
 export interface Config {
   version: number;
-  audio: { source_mic_id: string | null; monitor_output_id: string | null;
+  audio: { source_mic_id: string | null; output_preview_enabled: boolean;
            virtual_mic_mode: string; input_gain_db: number; limiter_enabled: boolean };
   translation: { target_language: string };
   mix: { original_voice_percent: number; translated_voice_percent: number; duck_original: boolean };
@@ -114,7 +114,8 @@ export const cmd = {
   getAccountStatus: () => invoke<AccountStatus>("get_account_status"),
   setMode: (mode: BackendMode) => invoke("set_virtual_mic_mode", { mode }),
   setSourceMic: (deviceId: string) => invoke("set_source_mic", { deviceId }),
-  setMonitorOutput: (deviceId: string | null) => invoke("set_monitor_output", { deviceId }),
+  setOutputPreviewEnabled: (enabled: boolean) =>
+    invoke("set_output_preview_enabled", { enabled }),
   setTargetLanguage: (language: string) => invoke("set_target_language", { language }),
   setMixPercent: (percent: number) => invoke("set_mix_percent", { percent }),
   setCaptionsConfig: (c: Config["captions"]) => invoke("set_captions_config", { c }),

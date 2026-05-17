@@ -26,6 +26,27 @@ describe("AccountPane", () => {
 import AudioPane from "./panes/AudioPane.svelte";
 import { render as r3 } from "@testing-library/svelte";
 describe("AudioPane", () => {
+  function audioPaneConfig(outputPreviewEnabled = false) {
+    return {
+      version: 1,
+      audio: {
+        source_mic_id: null,
+        output_preview_enabled: outputPreviewEnabled,
+        virtual_mic_mode: "silence",
+        input_gain_db: 0,
+        limiter_enabled: true,
+      },
+      translation: { target_language: "en" },
+      mix: { original_voice_percent: 0, translated_voice_percent: 100, duck_original: true },
+      captions: { enabled: true, show_source: true, show_target: true, font_size: "medium", always_on_top: true },
+      privacy: { save_transcript_history: true },
+      ui: { show_latency_badge: false, launch_at_login: false, hide_dock_icon: false },
+      account: { openai_api_key: null, openai_api_key_verified: false, openai_api_key_last_verified: null },
+      shortcuts: { toggle_translate: "Cmd+Shift+T", silence: "Cmd+Shift+M", captions: "Cmd+Shift+C" },
+      onboarding_completed: true,
+    };
+  }
+
   it("renders 3 mode cards and honest 'no input devices' when device list empty", () => {
     const { container } = r3(AudioPane as any);
     expect(container.innerHTML).toContain("Output Mode");
@@ -47,6 +68,49 @@ describe("AudioPane", () => {
       expect(selected).toBe("pass");
     } finally {
       store.setMode = original;
+    }
+  });
+
+  it("renders output preview with the default output device name", () => {
+    const previousConfig = store.config;
+    const previousDevices = store.devices;
+    store.config = audioPaneConfig(false) as any;
+    store.devices = {
+      inputs: [],
+      outputs: [{ id: "coreaudio:uid:default-output", name: "Mac Speakers" }],
+    };
+
+    try {
+      const { container } = r3(AudioPane as any);
+      expect(container.innerHTML).toContain("Output Preview");
+      expect(container.innerHTML).toContain("Mirror to speakers");
+      expect(container.innerHTML).toContain("Mac Speakers");
+    } finally {
+      store.config = previousConfig;
+      store.devices = previousDevices;
+    }
+  });
+
+  it("clicking output preview toggle calls store.setOutputPreview", async () => {
+    const previousConfig = store.config;
+    const previousDevices = store.devices;
+    const original = store.setOutputPreview.bind(store);
+    let selected: boolean | null = null;
+    store.config = audioPaneConfig(false) as any;
+    store.devices = {
+      inputs: [],
+      outputs: [{ id: "coreaudio:uid:default-output", name: "Mac Speakers" }],
+    };
+    store.setOutputPreview = async (enabled: boolean) => { selected = enabled; };
+
+    try {
+      const { getByLabelText } = r3(AudioPane as any);
+      await fireEvent.click(getByLabelText("Mirror audio to default output"));
+      expect(selected).toBe(true);
+    } finally {
+      store.setOutputPreview = original;
+      store.config = previousConfig;
+      store.devices = previousDevices;
     }
   });
 });

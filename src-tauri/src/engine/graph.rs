@@ -42,6 +42,7 @@ use intervox_core::audio::resampler::LinearResampler;
 use intervox_core::state::VirtualMicMode;
 use intervox_core::FrameRouting;
 
+use super::playback::{self, PlaybackSlot};
 use super::ring::RingProducer;
 use super::translate_chain::{
     push_original_samples, SharedOriginalQueue, OPENAI_UPLINK_CHUNK_SAMPLES,
@@ -114,6 +115,8 @@ pub(super) struct RouteFrameContext<'a> {
     pub uplink_chunker: &'a mut OpenAiChunker,
     /// Optional 48 kHz original-audio tap for Translate with original voice.
     pub original_queue: Option<&'a SharedOriginalQueue>,
+    /// Optional local speaker preview of the final virtual-mic signal.
+    pub output_preview: &'a PlaybackSlot,
     /// Shared counters for lossy realtime backpressure paths.
     pub backpressure: &'a AudioBackpressureCounters,
 }
@@ -132,6 +135,7 @@ pub(super) fn route_frame(mode: VirtualMicMode, frame: &[f32], ctx: RouteFrameCo
         // live path, so it must drop stale unread backlog rather than queueing
         // seconds of delayed microphone audio.
         ctx.ring.write_live(frame);
+        playback::tap_slot(ctx.output_preview, frame);
         let level = LevelMeter::measure(frame);
         ctx.out_level.store(level.rms.to_bits(), Ordering::Relaxed);
         ctx.output_sequence.fetch_add(1, Ordering::Release);
@@ -260,6 +264,7 @@ mod tests {
         resampler: &mut LinearResampler,
         uplink_chunker: &mut super::OpenAiChunker,
         original_queue: Option<&translate_chain::SharedOriginalQueue>,
+        preview: Option<&std::sync::Mutex<Vec<f32>>>,
     ) -> bool {
         use intervox_core::audio::level_meter::LevelMeter;
         use intervox_core::FrameRouting;
@@ -270,6 +275,9 @@ mod tests {
         if routing.mic_to_ring {
             uplink_chunker.clear();
             ring.write(frame);
+            if let Some(preview) = preview {
+                preview.lock().unwrap().extend_from_slice(frame);
+            }
             let level = LevelMeter::measure(frame);
             out_level.store(level.rms.to_bits(), Ordering::Relaxed);
             output_sequence.fetch_add(1, Ordering::Release);
@@ -365,6 +373,7 @@ mod tests {
             &mut resampler,
             &mut chunker,
             None,
+            None,
         );
 
         assert!(ring.was_written(), "PassThrough must write frame to ring");
@@ -398,6 +407,7 @@ mod tests {
             &mut resampler,
             &mut chunker,
             None,
+            None,
         );
 
         assert!(
@@ -427,6 +437,7 @@ mod tests {
             &mut resampler,
             &mut chunker,
             Some(&queue),
+            None,
         );
 
         assert!(
@@ -458,6 +469,7 @@ mod tests {
             &mut resampler,
             &mut chunker,
             None,
+            None,
         );
 
         assert!(!ring.was_written(), "Silence must NOT write to ring");
@@ -482,6 +494,7 @@ mod tests {
             &empty_uplink(),
             &mut resampler,
             &mut chunker,
+            None,
             None,
         );
 
@@ -516,6 +529,7 @@ mod tests {
                 &uplink,
                 &mut resampler,
                 &mut chunker,
+                None,
                 None,
             );
             assert_eq!(
@@ -560,6 +574,7 @@ mod tests {
             &mut resampler,
             &mut chunker,
             None,
+            None,
         );
 
         assert!(!ring.was_written());
@@ -582,6 +597,7 @@ mod tests {
         resampler: &mut LinearResampler,
     ) {
         let mut chunker = super::OpenAiChunker::new();
+        let preview = Arc::new(parking_lot::Mutex::new(None));
         super::route_frame(
             VirtualMicMode::PassThrough,
             &[],
@@ -593,6 +609,7 @@ mod tests {
                 resampler,
                 uplink_chunker: &mut chunker,
                 original_queue: None,
+                output_preview: &preview,
                 backpressure: &super::AudioBackpressureCounters::default(),
             },
         );
@@ -621,6 +638,7 @@ mod tests {
             &mut resampler,
             &mut chunker,
             Some(&queue),
+            None,
         );
 
         let q_len = queue.lock().len();
@@ -653,12 +671,67 @@ mod tests {
             &mut resampler,
             &mut chunker,
             None,
+            None,
         );
 
         let q_len = queue.lock().len();
         assert_eq!(
             q_len, 0,
             "Translate at 0% original voice must NOT push to original_queue; got len={q_len}"
+        );
+    }
+
+    #[test]
+    fn passthrough_previews_the_same_frame_sent_to_ring() {
+        let ring = TestRingProducer::new();
+        let out_level = AtomicU32::new(0);
+        let output_sequence = AtomicU64::new(0);
+        let frame = nonzero_frame();
+        let preview = std::sync::Mutex::new(Vec::new());
+        let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
+
+        route_frame_test(
+            VirtualMicMode::PassThrough,
+            &frame,
+            &ring,
+            &out_level,
+            &output_sequence,
+            &empty_uplink(),
+            &mut resampler,
+            &mut chunker,
+            None,
+            Some(&preview),
+        );
+
+        assert_eq!(*preview.lock().unwrap(), frame);
+    }
+
+    #[test]
+    fn translate_does_not_preview_raw_microphone_frame() {
+        let ring = TestRingProducer::new();
+        let out_level = AtomicU32::new(0);
+        let frame = nonzero_frame();
+        let preview = std::sync::Mutex::new(Vec::new());
+        let mut resampler = LinearResampler::new(48_000, 24_000);
+        let mut chunker = super::OpenAiChunker::new();
+
+        route_frame_test(
+            VirtualMicMode::Translate,
+            &frame,
+            &ring,
+            &out_level,
+            &AtomicU64::new(0),
+            &empty_uplink(),
+            &mut resampler,
+            &mut chunker,
+            None,
+            Some(&preview),
+        );
+
+        assert!(
+            preview.lock().unwrap().is_empty(),
+            "Translate must preview only the final translated block, not raw mic"
         );
     }
 }

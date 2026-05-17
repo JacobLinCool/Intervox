@@ -26,7 +26,7 @@ pub fn db_to_percent(db: f32) -> f32 {
 #[serde(default)]
 pub struct AudioConfig {
     pub source_mic_id: Option<String>,
-    pub monitor_output_id: Option<String>,
+    pub output_preview_enabled: bool,
     pub virtual_mic_mode: String,
     pub input_gain_db: f32,
     pub limiter_enabled: bool,
@@ -36,7 +36,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             source_mic_id: None,
-            monitor_output_id: None,
+            output_preview_enabled: false,
             virtual_mic_mode: "silence".into(),
             input_gain_db: 0.0,
             limiter_enabled: true,
@@ -246,6 +246,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.version, 1);
         assert_eq!(c.audio.virtual_mic_mode, "silence");
+        assert!(!c.audio.output_preview_enabled);
         assert!(c.audio.limiter_enabled);
         assert_eq!(c.translation.target_language, "en");
         assert_eq!(c.mix.original_voice_percent, 0);

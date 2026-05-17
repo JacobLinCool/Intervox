@@ -503,13 +503,29 @@ pub async fn set_source_mic(
 }
 
 #[tauri::command]
-pub fn set_monitor_output(
-    device_id: Option<String>,
-    h: tauri::State<AppHandle>,
+pub async fn set_output_preview_enabled(
+    enabled: bool,
+    h: tauri::State<'_, AppHandle>,
+    engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    update_config(&h, |cfg| {
-        cfg.audio.monitor_output_id = device_id;
-    })?;
+    let previous = h.config.lock().unwrap().audio.output_preview_enabled;
+    let engine_for_apply = std::sync::Arc::clone(&engine);
+    run_engine_control_result("set output preview", move || {
+        engine_for_apply.set_output_preview_enabled(enabled)
+    })
+    .await?;
+
+    if let Err(error) = update_config(&h, |cfg| {
+        cfg.audio.output_preview_enabled = enabled;
+    }) {
+        let engine_for_rollback = std::sync::Arc::clone(&engine);
+        let _ = run_engine_control_result("rollback output preview", move || {
+            engine_for_rollback.set_output_preview_enabled(previous)
+        })
+        .await;
+        return Err(error);
+    }
+
     Ok(())
 }
 

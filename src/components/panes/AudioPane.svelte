@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
   import { MODES } from "$lib/constants";
-  import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown } from "$lib/controls";
+  import { PaneTitle, FieldGroup, Row, RowLabel, Pulldown, Toggle } from "$lib/controls";
   import { SysIcon } from "$lib/icons";
   import { VUStrip, formatDbfs } from "$lib/vu";
   import { css } from "$lib/util";
@@ -12,6 +12,9 @@
   );
 
   let noDevices = $derived(store.devices.inputs.length === 0);
+  let noOutputDevices = $derived(store.devices.outputs.length === 0);
+  let defaultOutputName = $derived(store.devices.outputs[0]?.name ?? "No output device");
+  let outputPreviewEnabled = $derived(store.config?.audio.output_preview_enabled ?? false);
 </script>
 
 <PaneTitle
@@ -63,6 +66,40 @@
         {formatDbfs(store.inputLevel)}
       </div>
     </div>
+  </Row>
+</FieldGroup>
+
+<FieldGroup title="Output Preview">
+  <Row last>
+    <div
+      style={css({
+        width: 36,
+        height: 36,
+        borderRadius: 9,
+        background: "color-mix(in oklch, var(--c-pass) 16%, transparent)",
+        color: "var(--c-pass)",
+        display: "grid",
+        placeItems: "center",
+        flexShrink: 0,
+      })}
+    >
+      <SysIcon name="speaker" size={19} />
+    </div>
+    <RowLabel
+      title="Mirror to speakers"
+      sub={noOutputDevices
+        ? "No macOS output device is available."
+        : `Plays the same audio sent to Translator Mic through ${defaultOutputName}.`}
+    />
+    <span style={css({ marginLeft: "auto", display: "flex", alignItems: "center" })}>
+      <Toggle
+        value={outputPreviewEnabled}
+        onChange={(v) => store.setOutputPreview(v)}
+        disabled={noOutputDevices}
+        tint="var(--c-pass)"
+        ariaLabel="Mirror audio to default output"
+      />
+    </span>
   </Row>
 </FieldGroup>
 

@@ -6,18 +6,21 @@
     onChange,
     tint = "var(--c-translate)",
     ariaLabel = "Toggle setting",
+    disabled = false,
   }: {
     value: boolean;
     onChange: (v: boolean) => void;
     tint?: string;
     ariaLabel?: string;
+    disabled?: boolean;
   } = $props();
 </script>
 
 <button
-  onclick={() => onChange(!value)}
+  onclick={() => { if (!disabled) onChange(!value); }}
   aria-label={ariaLabel}
   aria-pressed={value}
+  disabled={disabled}
   style={css({
     width: 36,
     height: 22,
@@ -25,7 +28,8 @@
     border: "none",
     padding: 2,
     background: value ? tint : "rgba(120,120,128,0.28)",
-    cursor: "pointer",
+    cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.55 : 1,
     transition: "background 160ms",
     display: "inline-flex",
     alignItems: "center",

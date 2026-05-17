@@ -154,6 +154,12 @@ pub fn input_device_name_for_id(device_id: &str) -> Option<String> {
     resolve_input_device_id(device_id).map(|device| device.name)
 }
 
+pub fn default_output_device_id() -> Option<String> {
+    default_device(PROP_DEFAULT_OUTPUT)
+        .and_then(device_uid)
+        .map(|uid| device_id_from_uid(&uid))
+}
+
 pub fn resolve_input_device_id(device_id: &str) -> Option<ResolvedInputDevice> {
     let target_uid = uid_from_device_id(device_id)?;
     let devices = device_ids();

@@ -549,6 +549,17 @@ pub fn run() {
                     // a second CoreAudio enumeration.
                     let driver_state = crate::driver_status::state_from_devices(&devices);
                     let installed = driver_state == crate::driver_status::DriverState::Healthy;
+                    let default_output_id = devices.outputs.first().map(|device| device.id.clone());
+
+                    if let Some(engine) =
+                        handle.try_state::<std::sync::Arc<crate::engine::Engine>>()
+                    {
+                        let engine = std::sync::Arc::clone(&engine);
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            engine.sync_output_preview_default_device(default_output_id.as_deref());
+                        })
+                        .await;
+                    }
 
                     // Update managed state and capture a clone for the event.
                     // The MutexGuard is dropped before the next await point.
@@ -581,7 +592,7 @@ pub fn run() {
             commands::record_frontend_meter_diagnostics,
             commands::record_frontend_lifecycle_diagnostics,
             commands::set_source_mic,
-            commands::set_monitor_output,
+            commands::set_output_preview_enabled,
             commands::set_target_language,
             commands::set_mix_settings,
             commands::install_virtual_mic,

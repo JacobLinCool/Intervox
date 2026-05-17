@@ -551,6 +551,21 @@ class Store {
     await this.refreshStatus();
   }
 
+  async setOutputPreview(enabled: boolean): Promise<void> {
+    if (!this.config) return;
+    const previous = this.config.audio.output_preview_enabled;
+    this.config.audio.output_preview_enabled = enabled;
+
+    const ok = await this.tryCmd(() => cmd.setOutputPreviewEnabled(enabled));
+    if (!ok) {
+      if (this.config) this.config.audio.output_preview_enabled = previous;
+      this.pushToast(
+        "error",
+        enabled ? "Couldn't start output preview" : "Couldn't stop output preview",
+      );
+    }
+  }
+
   async setMixPercent(n: number): Promise<void> {
     const clamped = Math.max(0, Math.min(30, n));
     const ok = await this.tryCmd(() => cmd.setMixPercent(clamped));
