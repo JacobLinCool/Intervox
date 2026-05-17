@@ -39,10 +39,16 @@
   ];
 
   // ── Derived: canNext ────────────────────────────────────────
+  const sourceMicSelected = $derived(!!store.config?.audio.source_mic_id);
+  const translationTestPassed = $derived(
+    sourceMicSelected && store.audioInputDetected && store.tgtText.trim().length > 0
+  );
   const canNext = $derived(
     step === 1 ? store.account.verified :
     step === 2 ? store.micPermission === "granted" :
     step === 3 ? (store.status?.virtualMicInstalled === true) :
+    step === 4 ? sourceMicSelected :
+    step === 6 ? translationTestPassed :
     true
   );
 
@@ -144,14 +150,21 @@
     // store.lastError will be set on failure — component reads it honestly
   }
 
-  // Step 4 and Step 6 need a dedicated input-level probe because the live
-  // engine can still be in Silence mode during onboarding.
+  // Step 4 uses a dedicated input-level probe because the live engine can
+  // still be in Silence mode while selecting the source microphone.
   $effect(() => {
-    if (step !== 4 && step !== 6) return;
+    if (step !== 4) return;
     void store.startMicLevelProbe();
     return () => {
       void store.stopMicLevelProbe();
     };
+  });
+
+  // Step 6 is a real end-to-end translation test, so it must run the live
+  // translate mode rather than the level-only probe.
+  $effect(() => {
+    if (step !== 6) return;
+    void store.setMode("translate");
   });
 
   // Derived test stage from real store state (no setTimeout)
@@ -308,7 +321,7 @@
               <div class="card" style={css({ flex: 1, padding: 16, display: "flex", flexDirection: "column", gap: 8 })}>
                 <span class="zh" style={css({ fontSize: 11, color: "var(--txt-3)", letterSpacing: 0.4, textTransform: "uppercase", fontWeight: 600 })}>You speak</span>
                 <span class="zh" style={css({ fontSize: 18, fontWeight: 500 })}>我覺得這個功能下週可以開始實作。</span>
-                <span style={css({ fontSize: 11.5, color: "var(--txt-3)" })}>Source: Chinese · auto-detected</span>
+                <span style={css({ fontSize: 11.5, color: "var(--txt-3)" })}>Source: Auto-detected</span>
               </div>
               <div style={css({ display: "grid", placeItems: "center", padding: "0 4px", color: "var(--c-mixed)" })}>
                 <svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -601,7 +614,7 @@
                        role="radio"
                        aria-checked={selected}
                        tabindex="0"
-                       onkeydown={(e) => e.key === "Enter" && store.setSourceMic(m.id)}
+                       onkeydown={(e) => (e.key === "Enter" || e.key === " ") && store.setSourceMic(m.id)}
                        style={css({
                          display: "flex", alignItems: "center", gap: 12,
                          padding: "10px 12px",
@@ -648,7 +661,7 @@
                      role="radio"
                      aria-checked={selected}
                      tabindex="0"
-                     onkeydown={(e) => e.key === "Enter" && store.setTargetLang(l.code)}
+                     onkeydown={(e) => (e.key === "Enter" || e.key === " ") && store.setTargetLang(l.code)}
                      style={css({
                        display: "flex", alignItems: "center", gap: 12,
                        padding: "10px 12px",
@@ -681,7 +694,7 @@
                 Say something in your source language.
               </h1>
               <p style={css({ fontSize: 14, color: "var(--txt-2)", marginTop: 8, lineHeight: 1.5, maxWidth: 460 })}>
-                Default source is Chinese — you can change it from Translation settings. The translation will appear below.
+                The source language is detected automatically. The translation will appear below.
               </p>
             </div>
             <div class="card" style={css({ padding: 18, display: "flex", flexDirection: "column", gap: 14 })}>
@@ -737,6 +750,10 @@
               {#if store.tgtText}
                 <div style={css({ display: "flex", alignItems: "center", gap: 6, color: "var(--c-translate)", fontSize: 12.5, fontWeight: 500 })}>
                   <SysIcon name="ok" size={14} /> Working — translation received.
+                </div>
+              {:else if store.audioInputDetected}
+                <div style={css({ color: "var(--txt-3)", fontSize: 12.5 })}>
+                  Keep speaking until translated text appears.
                 </div>
               {/if}
             </div>

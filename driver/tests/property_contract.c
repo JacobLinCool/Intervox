@@ -273,8 +273,9 @@ static void TestIOEntrypointValidation(void) {
 static void StoreSample(intervox_ring_t* rb, uint64_t index, float sample) {
     uint32_t bits = 0;
     memcpy(&bits, &sample, sizeof(bits));
-    atomic_store_explicit(&rb->frames[index % INTERVOX_RING_CAPACITY], bits,
-                          memory_order_relaxed);
+    intervox_ring_slot_t* slot = &rb->slots[index % INTERVOX_RING_CAPACITY];
+    atomic_store_explicit(&slot->sequence, index << 1, memory_order_release);
+    atomic_store_explicit(&slot->bits, bits, memory_order_relaxed);
 }
 
 static void TestRingReadDropsStaleBacklog(void) {

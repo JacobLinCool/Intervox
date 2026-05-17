@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Build the packaged Intervox macOS app bundle.
 #
-# Default mode builds and signs the HAL driver, then runs `pnpm tauri build`.
-# Use `--release` when producing a distributable build: it runs the automated
-# checks, notarizes/staples the driver before packaging, then notarizes/staples
-# the final Intervox.app bundle.
+# Default mode builds a developer package. Use `--release` for a distributable
+# build: it runs the automated checks, notarizes/staples the driver before
+# packaging, then notarizes/staples the final Intervox.app bundle.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/driver_env.sh"
 
@@ -25,7 +24,7 @@ Options:
   -h, --help         Show this help.
 
 Environment:
-  SIGN_IDENTITY      Developer ID Application signing identity.
+  SIGN_IDENTITY      Developer ID Application identity used for both driver and app signing.
   NOTARY_PROFILE    notarytool credentials profile. Default: intervox-notary.
 EOF
 }
@@ -96,9 +95,12 @@ cd "$REPO_ROOT"
 
 if [[ "$RUN_CHECKS" -eq 1 ]]; then
     run cargo test --workspace
+    run cargo clippy --workspace --all-targets -- -D warnings
     run cargo test --manifest-path src-tauri/Cargo.toml
+    run cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
     run pnpm test
     run pnpm check
+    run pnpm build
 fi
 
 run "$REPO_ROOT/scripts/build_driver.sh"
@@ -108,6 +110,7 @@ if [[ "$NOTARIZE_DRIVER" -eq 1 ]]; then
     run "$REPO_ROOT/scripts/notarize_driver.sh"
 fi
 
+export APPLE_SIGNING_IDENTITY="$SIGN_IDENTITY"
 run pnpm tauri build
 
 if [[ ! -d "$APP_BUNDLE" ]]; then

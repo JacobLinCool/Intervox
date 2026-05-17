@@ -16,6 +16,7 @@ pub struct LinearResampler {
     has_prev: bool,
     pub in_hz: u32,
     pub out_hz: u32,
+    scratch: Vec<f32>,
 }
 
 impl LinearResampler {
@@ -27,40 +28,62 @@ impl LinearResampler {
             has_prev: false,
             in_hz,
             out_hz,
+            scratch: Vec::new(),
         }
     }
 
     pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        if input.is_empty() {
-            return Vec::new();
+        let mut out = Vec::with_capacity(self.max_output_len(input.len()));
+        self.process_into(input, &mut out);
+        out
+    }
+
+    pub fn reserve_for(&mut self, max_input_len: usize) {
+        self.scratch.reserve(max_input_len.saturating_add(1));
+    }
+
+    pub fn max_output_len(&self, input_len: usize) -> usize {
+        if input_len == 0 {
+            return 0;
         }
         if self.in_hz == self.out_hz {
-            return input.to_vec();
+            return input_len;
+        }
+        let ratio = self.out_hz as f64 / self.in_hz as f64;
+        ((input_len as f64 + 1.0) * ratio).ceil() as usize + 2
+    }
+
+    pub fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        out.clear();
+        if input.is_empty() {
+            return;
+        }
+        if self.in_hz == self.out_hz {
+            out.extend_from_slice(input);
+            return;
         }
 
         // Extended buffer: [prev?, input...]. prev provides index 0 continuity.
-        let mut ext: Vec<f32> = Vec::with_capacity(input.len() + 1);
+        self.scratch.clear();
         if self.has_prev {
-            ext.push(self.prev);
+            self.scratch.push(self.prev);
         }
-        ext.extend_from_slice(input);
+        self.scratch.extend_from_slice(input);
 
-        let mut out = Vec::new();
-        let last = ext.len() - 1;
+        let last = self.scratch.len() - 1;
         while self.cursor < last as f64 {
             let i = self.cursor.floor() as usize;
             let frac = (self.cursor - i as f64) as f32;
-            let a = ext[i];
-            let b = ext[i + 1];
+            let a = self.scratch[i];
+            let b = self.scratch[i + 1];
             out.push(a + (b - a) * frac);
             self.cursor += self.step;
         }
 
         // The last ext sample becomes index 0 for the next call.
-        self.prev = ext[last];
+        self.prev = self.scratch[last];
         self.has_prev = true;
         self.cursor -= last as f64;
-        out
     }
 }
 

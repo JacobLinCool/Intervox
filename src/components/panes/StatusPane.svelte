@@ -89,7 +89,7 @@
                       ? "Connecting to translation service…"
                       : "Reconnecting to translation service…",
                 }
-              : store.status?.translation === "idle" && store.mode !== "pass"
+              : store.status?.translation === "idle" && store.mode !== "pass" && store.mode !== "silence"
                 ? { ok: true, label: "Connecting to translation service…" }
                 : store.mode === "pass"
                   ? {

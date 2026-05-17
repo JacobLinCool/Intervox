@@ -11,7 +11,6 @@
   const isSilence     = $derived(store.mode === "silence" && !store.lastError);
   const isError       = $derived(!!store.lastError);
 
-  // caption position UI-only; default bottom
   const posStyle = { bottom: 90 };
 
   // ── Font size ───────────────────────────────────────────────
@@ -53,7 +52,7 @@
       left: "50%",
       transform: "translateX(-50%)",
       ...posStyle,
-      width: 620,
+      width: "min(620px, calc(100vw - 32px))",
       zIndex: 40,
       animation: "captions-in 220ms ease-out both",
     })}
@@ -102,9 +101,10 @@
           <!-- Close button -->
           <span
             role="button"
+            aria-label="Close captions"
             tabindex="0"
             onclick={() => store.setCaptionsOpen(false)}
-            onkeydown={(e) => e.key === "Enter" && store.setCaptionsOpen(false)}
+            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && store.setCaptionsOpen(false)}
             style={css({ opacity: 0.65, cursor: "pointer", padding: 2 })}
           >
             <SysIcon name="close" size={10} />

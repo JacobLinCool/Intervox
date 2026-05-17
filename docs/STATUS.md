@@ -269,20 +269,6 @@ operator after completing the runbook; they are NOT checked here.
 
 These items require a human operator with a real OpenAI API key, a microphone, and the
 relevant meeting apps. Each maps to a numbered step in `docs/RUNBOOK-acceptance.md`.
-Check each box only after completing the corresponding runbook step.
-
-- [ ] Silence mode: meeting app hears silence and OpenAI is disconnected. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A1)
-- [ ] PassThrough mode: meeting app hears original mic with low latency. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A2)
-- [ ] Translate mode: meeting app hears translated speech only. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A3)
-- [ ] TranslateWithOriginal mode: meeting app hears translated speech with faint delayed original. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A4)
-- [ ] Captions show live source and target text. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A5)
-- [ ] App quit keeps virtual mic device available and silent. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A6)
-- [ ] Driver restart and app restart recover without manual cleanup. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A7)
-- [ ] Runtime logs contain no raw audio, transcript text, or keys; transcript history files are local/user-controlled. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A8)
-- [ ] BYOK key is never written to logs. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A9)
-- [ ] Zoom smoke test passes. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A10)
-- [ ] Google Meet smoke test passes. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A11)
-- [ ] QuickTime/CoreAudio capture smoke test passes. (CODE COMPLETE — verify via docs/RUNBOOK-acceptance.md step A12)
 
 ## Not Yet Implemented
 

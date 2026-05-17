@@ -17,6 +17,7 @@
     <RowLabel title="Show latency badge in menu bar" />
     <span style={css({ marginLeft: "auto" })}>
       <Toggle
+        ariaLabel="Toggle latency badge"
         value={store.config?.ui.show_latency_badge ?? false}
         onChange={(v) => store.setUiConfig({ show_latency_badge: v })}
         tint="var(--c-mixed)"
@@ -45,6 +46,7 @@
     <RowLabel title="Launch at login" />
     <span style={css({ marginLeft: "auto" })}>
       <Toggle
+        ariaLabel="Toggle launch at login"
         value={store.config?.ui.launch_at_login ?? false}
         onChange={(v) => store.setUiConfig({ launch_at_login: v })}
         tint="var(--c-mixed)"
@@ -55,6 +57,7 @@
     <RowLabel title="Hide Dock icon" sub="Run as a menu bar app only." />
     <span style={css({ marginLeft: "auto" })}>
       <Toggle
+        ariaLabel="Toggle Dock icon visibility"
         value={store.config?.ui.hide_dock_icon ?? false}
         onChange={(v) => store.setUiConfig({ hide_dock_icon: v })}
         tint="var(--c-mixed)"

@@ -34,7 +34,7 @@ describe("connectionChip", () => {
     expect(v.tone).toBe("error");
     expect(v.text).toBe("Invalid API key");
   });
-  it("failed without title falls back", () => {
+  it("failed without title uses default message", () => {
     expect(connectionChip("translate", "failed", "—", null).text).toBe("Translation disconnected");
   });
   it("connecting and reconnecting are warn", () => {

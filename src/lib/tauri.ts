@@ -23,7 +23,7 @@ export interface AppError {
 }
 export interface AccountStatus {
   hasKey: boolean; verified: boolean;
-  maskedKey: string | null; lastVerified: string | null; usageUsd: number;
+  maskedKey: string | null; lastVerified: string | null;
   monthMinutes: number; monthUsd: number; totalMinutes: number; totalUsd: number;
 }
 export type MicPermission = "granted" | "denied" | "notDetermined" | "restricted";

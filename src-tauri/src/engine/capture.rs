@@ -14,11 +14,14 @@
 //! - The `sink` sender (`SyncSender<Vec<f32>>`).
 //! - The `level` `Arc<AtomicU32>` (shared with the Engine's 20 Hz emitter).
 //!
-//! The callback NEVER blocks: `try_send` drops the frame on full/disconnected.
-//! No unbounded allocation beyond the unavoidable resampled `Vec`.
+//! The callback NEVER blocks and never allocates after stream construction:
+//! it borrows preallocated buffers from a bounded pool, fills one, and
+//! `try_send`s the frame. Full/disconnected channels drop the frame and return
+//! the buffer to the pool.
 
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,6 +41,8 @@ const TARGET_HZ: u32 = 48_000;
 /// Capacity of the bounded inter-thread channel.
 const SINK_BOUND: usize = 64;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_CALLBACK_FRAMES: usize = 16_384;
+const MAX_CAPTURE_OUTPUT_FRAMES: usize = 32_768;
 
 // ── CaptureHandle ─────────────────────────────────────────────────────────────
 
@@ -48,6 +53,37 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+pub struct CapturedFrame {
+    samples: Vec<f32>,
+    pool: SyncSender<Vec<f32>>,
+}
+
+impl CapturedFrame {
+    fn new(samples: Vec<f32>, pool: SyncSender<Vec<f32>>) -> Self {
+        Self { samples, pool }
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        &self.samples
+    }
+}
+
+impl Deref for CapturedFrame {
+    type Target = [f32];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl Drop for CapturedFrame {
+    fn drop(&mut self) {
+        let mut samples = std::mem::take(&mut self.samples);
+        samples.clear();
+        let _ = self.pool.try_send(samples);
+    }
 }
 
 impl CaptureHandle {
@@ -81,11 +117,49 @@ impl Drop for CaptureHandle {
 /// Panics if `channels == 0`.
 pub fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
     assert!(channels > 0, "channels must be >= 1");
+    let mut out = Vec::with_capacity(interleaved.len() / channels as usize);
+    downmix_to_mono_f32_into(interleaved, channels, &mut out);
+    out
+}
+
+fn downmix_to_mono_f32_into(interleaved: &[f32], channels: u16, out: &mut Vec<f32>) {
+    assert!(channels > 0, "channels must be >= 1");
     let ch = channels as usize;
-    interleaved
-        .chunks_exact(ch)
-        .map(|frame| frame.iter().copied().sum::<f32>() / ch as f32)
-        .collect()
+    out.clear();
+    if interleaved.len() / ch > out.capacity() {
+        return;
+    }
+    for frame in interleaved.chunks_exact(ch) {
+        out.push(frame.iter().copied().sum::<f32>() / ch as f32);
+    }
+}
+
+fn downmix_converted_to_mono_into<T>(interleaved: &[T], channels: u16, out: &mut Vec<f32>)
+where
+    T: SizedSample + Copy,
+    f32: FromSample<T>,
+{
+    assert!(channels > 0, "channels must be >= 1");
+    let ch = channels as usize;
+    out.clear();
+    if interleaved.len() / ch > out.capacity() {
+        return;
+    }
+    for frame in interleaved.chunks_exact(ch) {
+        let mut sum = 0.0f32;
+        for &sample in frame {
+            sum += f32::from_sample(sample);
+        }
+        out.push(sum / ch as f32);
+    }
+}
+
+fn resampler_has_capacity(
+    resampler: &LinearResampler,
+    input_len: usize,
+    output: &Vec<f32>,
+) -> bool {
+    input_len <= MAX_CALLBACK_FRAMES && resampler.max_output_len(input_len) <= output.capacity()
 }
 
 // ── Device resolution ─────────────────────────────────────────────────────────
@@ -152,43 +226,54 @@ fn resolved_device_name(device: &cpal::Device) -> String {
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    sink: SyncSender<Vec<f32>>,
+    sink: SyncSender<CapturedFrame>,
+    pool_tx: SyncSender<Vec<f32>>,
+    pool_rx: Receiver<Vec<f32>>,
     level: Arc<AtomicU32>,
-    app: tauri::AppHandle,
+    stream_error: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, AppError>
 where
-    T: SizedSample + Send + 'static,
+    T: SizedSample + Send + Copy + 'static,
     f32: FromSample<T>,
 {
     let channels = config.channels;
     let in_hz = config.sample_rate.0;
     let mut resampler = LinearResampler::new(in_hz, TARGET_HZ);
+    resampler.reserve_for(MAX_CALLBACK_FRAMES);
+    let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES);
 
-    let err_app = app.clone();
     let stream = device
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                // 1. Convert to f32.
-                let f32_samples: Vec<f32> =
-                    data.iter().copied().map(|s| f32::from_sample(s)).collect();
+                downmix_converted_to_mono_into(data, channels, &mut mono);
+                if mono.is_empty() || mono.len() > MAX_CALLBACK_FRAMES {
+                    return;
+                }
 
-                // 2. Downmix to mono.
-                let mono = downmix_to_mono(&f32_samples, channels);
+                let Ok(mut resampled) = pool_rx.try_recv() else {
+                    return;
+                };
+                if !resampler_has_capacity(&resampler, mono.len(), &resampled) {
+                    let _ = pool_tx.try_send(resampled);
+                    return;
+                }
+                resampler.process_into(&mono, &mut resampled);
 
-                // 3. Resample to TARGET_HZ.
-                let resampled = resampler.process(&mono);
-
-                // 4. Measure level.
                 let audio_level = LevelMeter::measure(&resampled);
                 level.store(audio_level.rms.to_bits(), Ordering::Relaxed);
 
-                // 5. Non-blocking push — drop on back-pressure.
-                let _ = sink.try_send(resampled);
+                if sink
+                    .try_send(CapturedFrame::new(resampled, pool_tx.clone()))
+                    .is_err()
+                {
+                    // The frame is dropped here; CapturedFrame::drop returns
+                    // the buffer to the pool immediately.
+                }
             },
             move |err| {
-                let _ = err_app.emit("error", AppError::audio_device_lost());
-                eprintln!("[capture] cpal stream error: {err}");
+                let _ = err;
+                stream_error.store(true, Ordering::Release);
             },
             None,
         )
@@ -232,6 +317,9 @@ where
     let channels = config.channels;
     let in_hz = config.sample_rate.0;
     let mut resampler = LinearResampler::new(in_hz, TARGET_HZ);
+    resampler.reserve_for(MAX_CALLBACK_FRAMES);
+    let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES);
+    let mut resampled = Vec::with_capacity(MAX_CAPTURE_OUTPUT_FRAMES);
 
     device
         .build_input_stream(
@@ -239,12 +327,13 @@ where
             move |data: &[T], _: &cpal::InputCallbackInfo| {
                 callback_count.fetch_add(1, Ordering::Relaxed);
 
-                let f32_samples: Vec<f32> =
-                    data.iter().copied().map(|s| f32::from_sample(s)).collect();
-                let mono = downmix_to_mono(&f32_samples, channels);
+                downmix_converted_to_mono_into(data, channels, &mut mono);
+                if mono.is_empty() || !resampler_has_capacity(&resampler, mono.len(), &resampled) {
+                    return;
+                }
                 captured_frames.fetch_add(mono.len() as u64, Ordering::Relaxed);
 
-                let resampled = resampler.process(&mono);
+                resampler.process_into(&mono, &mut resampled);
                 let level = LevelMeter::measure(&resampled);
                 update_max_rms(&max_rms, level.rms);
             },
@@ -285,7 +374,7 @@ pub fn start(
     device_id: Option<&str>,
     level: Arc<AtomicU32>,
     app: tauri::AppHandle,
-) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<Vec<f32>>), AppError> {
+) -> Result<(CaptureHandle, std::sync::mpsc::Receiver<CapturedFrame>), AppError> {
     let device = resolve_input_device(device_id)?;
 
     let supported_config = device
@@ -295,8 +384,15 @@ pub fn start(
     let stream_config: cpal::StreamConfig = supported_config.config();
     let sample_format = supported_config.sample_format();
 
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(SINK_BOUND);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<CapturedFrame>(SINK_BOUND);
+    let (pool_tx, pool_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(SINK_BOUND);
+    for _ in 0..SINK_BOUND {
+        pool_tx
+            .try_send(Vec::with_capacity(MAX_CAPTURE_OUTPUT_FRAMES))
+            .map_err(|_| AppError::internal("capture buffer pool initialization failed"))?;
+    }
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), AppError>>(1);
+    let stream_error = Arc::new(AtomicBool::new(false));
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
@@ -304,38 +400,37 @@ pub fn start(
     let thread = std::thread::Builder::new()
         .name("capture".to_string())
         .spawn(move || {
+            let mut tx_slot = Some(tx);
+            let mut pool_tx_slot = Some(pool_tx);
+            let mut pool_rx_slot = Some(pool_rx);
+            let mut level_slot = Some(level);
+
+            macro_rules! build_for_format {
+                ($sample:ty) => {
+                    build_stream::<$sample>(
+                        &device,
+                        &stream_config,
+                        tx_slot.take().expect("capture sender taken once"),
+                        pool_tx_slot.take().expect("capture pool sender taken once"),
+                        pool_rx_slot.take().expect("capture pool receiver taken once"),
+                        level_slot.take().expect("capture level taken once"),
+                        Arc::clone(&stream_error),
+                    )
+                };
+            }
+
             // Build the stream inside this thread — cpal::Stream stays here.
             let stream_result = match sample_format {
-                cpal::SampleFormat::I8 => {
-                    build_stream::<i8>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::F32 => {
-                    build_stream::<f32>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::I16 => {
-                    build_stream::<i16>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::I32 => {
-                    build_stream::<i32>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::I64 => {
-                    build_stream::<i64>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::U8 => {
-                    build_stream::<u8>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::U16 => {
-                    build_stream::<u16>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::U32 => {
-                    build_stream::<u32>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::U64 => {
-                    build_stream::<u64>(&device, &stream_config, tx, level, app)
-                }
-                cpal::SampleFormat::F64 => {
-                    build_stream::<f64>(&device, &stream_config, tx, level, app)
-                }
+                cpal::SampleFormat::I8 => build_for_format!(i8),
+                cpal::SampleFormat::F32 => build_for_format!(f32),
+                cpal::SampleFormat::I16 => build_for_format!(i16),
+                cpal::SampleFormat::I32 => build_for_format!(i32),
+                cpal::SampleFormat::I64 => build_for_format!(i64),
+                cpal::SampleFormat::U8 => build_for_format!(u8),
+                cpal::SampleFormat::U16 => build_for_format!(u16),
+                cpal::SampleFormat::U32 => build_for_format!(u32),
+                cpal::SampleFormat::U64 => build_for_format!(u64),
+                cpal::SampleFormat::F64 => build_for_format!(f64),
                 other => {
                     let err =
                         AppError::internal(format!("unsupported input sample format: {other:?}"));
@@ -360,6 +455,9 @@ pub fn start(
 
             // Park this thread until the stop flag is set.
             while !stop_thread.load(Ordering::Acquire) {
+                if stream_error.swap(false, Ordering::AcqRel) {
+                    let _ = app.emit("error", AppError::audio_device_lost());
+                }
                 std::thread::park_timeout(std::time::Duration::from_millis(50));
             }
 

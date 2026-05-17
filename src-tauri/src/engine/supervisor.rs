@@ -218,7 +218,7 @@ pub async fn run_supervised(
         let run_start = std::time::Instant::now();
 
         // Run the realtime transport (owns relay_rx for this invocation).
-        realtime::run(
+        let run_exit = realtime::run(
             key.clone(),
             tgt_lang.clone(),
             relay_rx,
@@ -240,6 +240,10 @@ pub async fn run_supervised(
                 break;
             }
         };
+
+        if matches!(run_exit, realtime::RunExit::Terminal) {
+            break;
+        }
 
         // Determine if we should restart.
         let active = session_active.load(Ordering::Acquire);

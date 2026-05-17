@@ -284,7 +284,9 @@ fn probe_api_key(api_key_file: Option<&str>) -> (bool, bool, bool, String) {
     cfg.account.openai_api_key = Some(key.clone());
     cfg.account.openai_api_key_verified = false;
     cfg.account.openai_api_key_last_verified = None;
-    appcfg::persist(&cfg);
+    if let Err(e) = appcfg::persist(&cfg) {
+        return (true, false, false, format!("save-error:{e}"));
+    }
 
     let verified = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt.block_on(async {
@@ -309,7 +311,9 @@ fn probe_api_key(api_key_file: Option<&str>) -> (bool, bool, bool, String) {
                 KeyValidation::Verified => {
                     let mut cfg = appcfg::load_or_default();
                     cfg.account.openai_api_key_verified = true;
-                    appcfg::persist(&cfg);
+                    if let Err(e) = appcfg::persist(&cfg) {
+                        return (false, format!("save-error:{e}"));
+                    }
                     (true, "verified".into())
                 }
                 KeyValidation::InvalidKey => (false, "invalid-key".into()),
@@ -456,7 +460,10 @@ pub fn run() {
                             };
                             let h = app.state::<AppHandle>();
                             let engine = app.state::<std::sync::Arc<crate::engine::Engine>>();
-                            commands::apply_mode(app, &h, &engine, mode);
+                            if let Err(e) = commands::apply_mode(app, &h, &engine, mode) {
+                                use tauri::Emitter as _;
+                                let _ = app.emit("error", e);
+                            }
                         }
 
                         // ── Show Window ─────────────────────────────────────

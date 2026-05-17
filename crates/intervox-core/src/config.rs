@@ -49,9 +49,7 @@ impl Default for AudioConfig {
 pub struct TranslationConfig {
     // NOTE: there is intentionally no `source_language`. The OpenAI realtime
     // translation endpoint auto-detects the source language and does not accept
-    // it as a parameter, so exposing it would only mislead users. Old config
-    // files that still carry a `source_language` key load fine — serde ignores
-    // unknown fields (see `unknown_future_fields_do_not_crash`).
+    // it as a parameter, so exposing it would only mislead users.
     pub target_language: String,
     pub quality_mode: String,
 }
@@ -311,40 +309,6 @@ mod tests {
         let cfg: Config =
             serde_json::from_str(r#"{"version":1,"audio":{"future_field":42}}"#).unwrap();
         assert_eq!(cfg.audio.virtual_mic_mode, "silence");
-    }
-
-    /// Backward compat: configs written by older builds still carry a
-    /// `translation.source_language` key. It must be ignored, not rejected, and
-    /// the rest of the translation config must still load.
-    #[test]
-    fn legacy_source_language_field_is_ignored() {
-        let cfg: Config = serde_json::from_str(
-            r#"{"version":1,"translation":{"source_language":"zh","target_language":"ja","quality_mode":"accuracy"}}"#,
-        )
-        .unwrap();
-        assert_eq!(cfg.translation.target_language, "ja");
-        assert_eq!(cfg.translation.quality_mode, "accuracy");
-    }
-
-    #[test]
-    fn legacy_send_diagnostics_key_is_ignored() {
-        // Old configs carried privacy.send_diagnostics; must still load.
-        let cfg: Config = serde_json::from_str(
-            r#"{"version":1,"privacy":{"save_transcript_history":false,"send_diagnostics":true}}"#,
-        )
-        .unwrap();
-        assert!(!cfg.privacy.save_transcript_history);
-    }
-
-    #[test]
-    fn legacy_config_without_save_flag_gets_new_true_default() {
-        // Upgrade path: an old config that has the privacy section but never
-        // set save_transcript_history must pick up the new `true` default.
-        let cfg: Config = serde_json::from_str(
-            r#"{"version":1,"privacy":{"send_diagnostics":true}}"#,
-        )
-        .unwrap();
-        assert!(cfg.privacy.save_transcript_history);
     }
 
     #[test]

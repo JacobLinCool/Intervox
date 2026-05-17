@@ -104,7 +104,7 @@ pub fn mode_to_ring_u32(mode: intervox_core::state::VirtualMicMode) -> u32 {
 }
 
 /// Inverse of `mode_to_ring_u32`.  Any value not in {1, 2, 3} maps to
-/// `Silence` (defensive default).
+/// `Silence` so an invalid shared-memory value cannot emit audio.
 ///
 /// | u32 | Mode                  |
 /// |-----|-----------------------|

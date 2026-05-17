@@ -33,7 +33,9 @@ use futures_util::{SinkExt, StreamExt};
 use intervox_core::realtime::events::{build_session_update, parse_server_event, TranslationEvent};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderName, http::HeaderValue, Message},
+    tungstenite::{
+        client::IntoClientRequest, http::HeaderName, http::HeaderValue, Error as WsError, Message,
+    },
 };
 
 /// OpenAI Realtime Translation WebSocket endpoint (GA, 2025).
@@ -66,6 +68,18 @@ pub fn backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunExit {
+    Terminal,
+}
+
+fn handshake_status(err: &WsError) -> Option<u16> {
+    match err {
+        WsError::Http(response) => Some(response.status().as_u16()),
+        _ => None,
+    }
+}
+
 /// Return a stable, anonymous, non-PII install identifier for the
 /// `OpenAI-Safety-Identifier` header.
 ///
@@ -74,55 +88,65 @@ pub fn backoff(attempt: u32) -> std::time::Duration {
 /// `~/Library/Application Support/app.intervox.desktop/install-id` (or the
 /// platform equivalent) so that the same identifier is reused across launches.
 ///
-/// If reading or writing fails at any point the function falls back to the
-/// fixed string `"intervox-desktop"`.  Either way the value is:
-/// - **Not PII** — it does not contain the user's name, email, IP, or any
-///   other personally-identifiable information.
-/// - **Never logged** — callers must not include it in any log line.
+/// Creation or persistence failure is terminal for a realtime session. A fixed
+/// shared identifier would hide install-specific errors and break the stability
+/// contract.
 ///
-/// # SPEC note
-/// Whether `OpenAI-Safety-Identifier` is strictly required vs. recommended is
-/// not 100% confirmed in the public docs; we send it defensively.
+/// The value is not PII and must never be logged.
 /// In-process cache so `safety_identifier()` returns the same value within a
 /// single process run regardless of how many times it is called.
-static SAFETY_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static SAFETY_ID: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
 
-pub fn safety_identifier() -> String {
+pub fn safety_identifier() -> Result<String, String> {
     SAFETY_ID
-        .get_or_init(|| {
-            // Derive the path: <config_dir>/app.intervox.desktop/install-id
-            let id_path = dirs::config_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-                .join("app.intervox.desktop")
-                .join("install-id");
-
-            // Try to read an existing install ID from disk.
-            if let Ok(existing) = std::fs::read_to_string(&id_path) {
-                let trimmed = existing.trim().to_string();
-                if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return trimmed;
-                }
-            }
-
-            // Generate a fresh 16-byte random ID from /dev/urandom and hex-encode it.
-            let new_id: String = (|| -> Option<String> {
-                use std::io::Read;
-                let mut f = std::fs::File::open("/dev/urandom").ok()?;
-                let mut buf = [0u8; 16];
-                f.read_exact(&mut buf).ok()?;
-                Some(buf.iter().map(|b| format!("{b:02x}")).collect())
-            })()
-            .unwrap_or_else(|| "intervox-desktop".to_string());
-
-            // Persist (best-effort; failure → same value used for this process lifetime).
-            if let Some(parent) = id_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&id_path, &new_id);
-
-            new_id
-        })
+        .get_or_init(resolve_safety_identifier)
         .clone()
+}
+
+fn resolve_safety_identifier() -> Result<String, String> {
+    use std::io::Read;
+
+    let base = dirs::config_dir()
+        .ok_or_else(|| "platform config directory is unavailable".to_string())?;
+    let dir = base.join("app.intervox.desktop");
+    let id_path = dir.join("install-id");
+
+    if let Ok(existing) = std::fs::read_to_string(&id_path) {
+        let trimmed = existing.trim().to_string();
+        if trimmed.len() == 32
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        {
+            return Ok(trimmed);
+        }
+    }
+
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create install-id directory: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot protect install-id directory: {e}"))?;
+    }
+
+    let mut f = std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
+    let mut buf = [0u8; 16];
+    f.read_exact(&mut buf)
+        .map_err(|e| format!("cannot read random install-id bytes: {e}"))?;
+    let new_id: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+
+    std::fs::write(&id_path, &new_id).map_err(|e| format!("cannot persist install-id: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&id_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot protect install-id: {e}"))?;
+    }
+
+    Ok(new_id)
 }
 
 /// Run the OpenAI Realtime transport.
@@ -144,7 +168,7 @@ pub async fn run(
     mut pcm_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
     ev_tx: tokio::sync::mpsc::Sender<TranslationEvent>,
     uplink_samples: std::sync::Arc<std::sync::atomic::AtomicU64>,
-) {
+) -> RunExit {
     let mut attempt: u32 = 0;
 
     loop {
@@ -154,7 +178,7 @@ pub async fn run(
             Err(e) => {
                 // Malformed constant — should never happen; log without the key.
                 eprintln!("[realtime] URL parse error: {e}");
-                break;
+                return RunExit::Terminal;
             }
         };
 
@@ -173,7 +197,7 @@ pub async fn run(
                             message: "API key contains invalid header characters".into(),
                         })
                         .await;
-                    return;
+                    return RunExit::Terminal;
                 }
             };
             headers.insert(
@@ -185,16 +209,34 @@ pub async fn run(
             // /v1/realtime/translations.  Do NOT re-add it.
 
             // Stable, anonymous, non-PII install identifier required by the GA
-            // translations endpoint.  Value must not be logged.
-            // SPEC: whether mandatory or advisory is not 100% confirmed in public
-            // docs; we send it defensively per the GA migration notes.
-            let sid = safety_identifier();
-            if let Ok(sid_val) = HeaderValue::from_str(&sid) {
-                headers.insert(HeaderName::from_static("openai-safety-identifier"), sid_val);
-            }
-            // If HeaderValue conversion fails (sid contains non-ASCII — should never
-            // happen because we only store hex or "intervox-desktop"), we skip the
-            // header rather than failing the connection.
+            // translations endpoint. Value must not be logged.
+            let sid = match safety_identifier() {
+                Ok(sid) => sid,
+                Err(e) => {
+                    eprintln!("[realtime] safety identifier error: {e}");
+                    let _ = ev_tx
+                        .send(TranslationEvent::Error {
+                            code: Some("SAFETY_IDENTIFIER".into()),
+                            message: "Cannot create the anonymous OpenAI safety identifier".into(),
+                        })
+                        .await;
+                    return RunExit::Terminal;
+                }
+            };
+            let sid_val = match HeaderValue::from_str(&sid) {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("[realtime] invalid safety identifier header: {e}");
+                    let _ = ev_tx
+                        .send(TranslationEvent::Error {
+                            code: Some("SAFETY_IDENTIFIER".into()),
+                            message: "Anonymous OpenAI safety identifier is invalid".into(),
+                        })
+                        .await;
+                    return RunExit::Terminal;
+                }
+            };
+            headers.insert(HeaderName::from_static("openai-safety-identifier"), sid_val);
         }
 
         // ── Connect ───────────────────────────────────────────────────────────
@@ -221,7 +263,7 @@ pub async fn run(
                                         // Channel closed — engine stopped capture.
                                         // Exit cleanly without reconnecting.
                                         let _ = ev_tx.send(TranslationEvent::Closed).await;
-                                        return;
+                                        return RunExit::Terminal;
                                     }
                                     Some(pcm) => {
                                         let b64 = intervox_core::audio::pcm::pcm16_to_base64(&pcm);
@@ -262,7 +304,7 @@ pub async fn run(
                                         let ev = parse_server_event(&s);
                                         if ev_tx.send(ev).await.is_err() {
                                             // Consumer gone — exit cleanly.
-                                            return;
+                                            return RunExit::Terminal;
                                         }
                                     }
                                     Some(Ok(Message::Binary(bytes))) => {
@@ -271,7 +313,7 @@ pub async fn run(
                                         if let Ok(s) = std::str::from_utf8(&bytes) {
                                             let ev = parse_server_event(s);
                                             if ev_tx.send(ev).await.is_err() {
-                                                return;
+                                                return RunExit::Terminal;
                                             }
                                         }
                                         // Non-UTF-8 binary: ignore silently.
@@ -297,14 +339,23 @@ pub async fn run(
                     };
 
                     if !reconnect {
-                        return;
+                        return RunExit::Terminal;
                     }
                 }
 
                 // Best-effort: signal closed before backoff.
                 let _ = ev_tx.send(TranslationEvent::Closed).await;
             }
-            Err(_e) => {
+            Err(e) => {
+                if matches!(handshake_status(&e), Some(401 | 403)) {
+                    let _ = ev_tx
+                        .send(TranslationEvent::Error {
+                            code: Some("AUTH".into()),
+                            message: "OpenAI rejected the API key for the realtime translation session".into(),
+                        })
+                        .await;
+                    return RunExit::Terminal;
+                }
                 // Do not interpolate the error — tungstenite connect errors can
                 // embed the full HTTP response (including echoed request headers
                 // such as Authorization).  Log only the attempt counter.
@@ -318,14 +369,14 @@ pub async fn run(
 
         // Check if the channel is already closed before sleeping.
         if ev_tx.is_closed() {
-            return;
+            return RunExit::Terminal;
         }
 
         tokio::time::sleep(delay).await;
 
         // After waking, check again — pcm_rx may have been dropped.
         if ev_tx.is_closed() {
-            return;
+            return RunExit::Terminal;
         }
     }
 }
@@ -399,25 +450,31 @@ mod tests {
 
     #[test]
     fn safety_identifier_is_non_empty_and_ascii() {
-        let id = safety_identifier();
+        let id = safety_identifier().expect("safety identifier should resolve on macOS");
         assert!(!id.is_empty(), "safety_identifier must not be empty");
         assert!(
             id.is_ascii(),
             "safety_identifier must be ASCII (got: {id:?})"
+        );
+        assert_eq!(id.len(), 32, "safety_identifier must be 16 bytes as hex");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "safety_identifier must be lowercase hex"
         );
     }
 
     #[test]
     fn safety_identifier_is_stable_across_calls() {
         // Call twice: the identifier must stay stable for a single app install.
-        let id1 = safety_identifier();
-        let id2 = safety_identifier();
+        let id1 = safety_identifier().expect("safety identifier should resolve on macOS");
+        let id2 = safety_identifier().expect("safety identifier should resolve on macOS");
         assert_eq!(id1, id2, "safety_identifier must be stable across calls");
     }
 
     #[test]
     fn safety_identifier_contains_no_pii_markers() {
-        let id = safety_identifier();
+        let id = safety_identifier().expect("safety identifier should resolve on macOS");
         // Must not contain the literal word "user", "email", IP patterns, or sk-
         assert!(
             !id.contains("sk-"),

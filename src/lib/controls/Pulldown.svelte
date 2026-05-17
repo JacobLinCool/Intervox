@@ -27,8 +27,10 @@
   let menuTop = $state(0);
   let menuWidth = $state(230);
   let menuMaxHeight = $state(280);
+  let activeIndex = $state(0);
 
   let cur = $derived(options.find((o) => o.value === value) ?? options[0]);
+  const activeOption = $derived(options[activeIndex] ?? cur);
 
   function portal(node: HTMLElement) {
     document.body.appendChild(node);
@@ -54,8 +56,38 @@
   }
 
   function toggleMenu() {
-    if (!open) placeMenu();
+    if (!open) {
+      activeIndex = Math.max(0, options.findIndex((o) => o.value === value));
+      placeMenu();
+    }
     open = !open;
+  }
+
+  function choose(v: any) {
+    onChange(v);
+    open = false;
+    buttonEl?.focus();
+  }
+
+  function onButtonKey(e: KeyboardEvent) {
+    if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (!open) {
+        activeIndex = Math.max(0, options.findIndex((o) => o.value === value));
+        placeMenu();
+        open = true;
+      } else if (e.key === "ArrowDown") {
+        activeIndex = (activeIndex + 1) % options.length;
+      } else {
+        choose(activeOption.value);
+      }
+    } else if (e.key === "ArrowUp" && open) {
+      e.preventDefault();
+      activeIndex = (activeIndex - 1 + options.length) % options.length;
+    } else if (e.key === "Escape" && open) {
+      e.preventDefault();
+      open = false;
+    }
   }
 
   $effect(() => {
@@ -88,7 +120,10 @@
   <button
     bind:this={buttonEl}
     class="btn"
+    aria-haspopup="listbox"
+    aria-expanded={open}
     onclick={toggleMenu}
+    onkeydown={onButtonKey}
     style={css({
       width: "100%",
       display: "flex",
@@ -144,6 +179,8 @@
       use:portal
       bind:this={menuEl}
       role="listbox"
+      tabindex="-1"
+      aria-activedescendant={`pulldown-${String(activeOption?.value ?? "")}`}
       style={css({
         position: "fixed",
         top: menuTop,
@@ -164,20 +201,20 @@
     >
       {#each options as o (o.value)}
         <div
+          id={`pulldown-${String(o.value)}`}
           role="option"
           tabindex="0"
           aria-selected={o.value === value}
           onclick={() => {
-            onChange(o.value);
-            open = false;
+            choose(o.value);
           }}
           onkeydown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
-              onChange(o.value);
-              open = false;
+              choose(o.value);
             }
           }}
           onmouseenter={(e) => {
+            activeIndex = options.findIndex((candidate) => candidate.value === o.value);
             (e.currentTarget as HTMLElement).style.background = "var(--c-mixed)";
             (e.currentTarget as HTMLElement).style.color = "#fff";
           }}

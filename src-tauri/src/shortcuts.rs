@@ -189,10 +189,18 @@ fn execute_shortcut_action(app: &tauri::AppHandle, action: ShortcutAction) {
             } else {
                 VirtualMicMode::Translate
             };
-            crate::commands::apply_mode(app, &h, &engine, new_mode);
+            if let Err(e) = crate::commands::apply_mode(app, &h, &engine, new_mode) {
+                use tauri::Emitter as _;
+                let _ = app.emit("error", e);
+            }
         }
         ShortcutAction::Silence => {
-            crate::commands::apply_mode(app, &h, &engine, VirtualMicMode::Silence);
+            if let Err(e) =
+                crate::commands::apply_mode(app, &h, &engine, VirtualMicMode::Silence)
+            {
+                use tauri::Emitter as _;
+                let _ = app.emit("error", e);
+            }
         }
         ShortcutAction::Captions => {
             if app.get_webview_window("captions").is_some() {

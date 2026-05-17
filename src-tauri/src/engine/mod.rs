@@ -521,7 +521,15 @@ impl Engine {
     ///
     /// Caller must hold the `inner` mutex lock.
     fn start_openai_session_locked(&self, g: &mut Inner) {
-        let cfg = crate::appcfg::load_or_default();
+        let cfg = {
+            use tauri::Manager as _;
+            self.app
+                .state::<crate::commands::AppHandle>()
+                .config
+                .lock()
+                .unwrap()
+                .clone()
+        };
         let key = match cfg
             .account
             .openai_api_key
@@ -669,24 +677,34 @@ impl Engine {
             // for this session (so we compute it at most once).
             let mut first_audio_measured = false;
 
-            // Task 8: segment accumulation buffers (task-local, reset after each flush).
+            // Segment accumulation buffers are task-local and reset after each flush.
             let mut src_seg = String::new();
             let mut tgt_seg = String::new();
-            // Task 8: silence-gap fallback timers.
+            // Silence-gap timers finalize transcript segments when the endpoint
+            // sends deltas without a terminal sentence-boundary event.
             let mut last_src_delta: Option<std::time::Instant> = None;
             let mut last_tgt_delta: Option<std::time::Instant> = None;
-            // Task 8: silence-gap interval — fires every 500 ms to check for stale segs.
+            // Fires every 500 ms to check for stale segments.
             let mut silence_tick = tokio::time::interval(std::time::Duration::from_millis(500));
             // Consume the first immediate tick so the loop doesn't flush on entry.
             silence_tick.tick().await;
 
-            // Task 8: inline flush helper — synchronous fs I/O (best-effort).
+            // Inline flush helper: synchronous fs I/O for already-buffered text.
             // Does NOT hold any engine MutexGuard; session_log_task has its own
             // internal Mutex which is always acquired and released within append().
             macro_rules! flush_seg {
                 ($seg:expr, $kind:expr, $lang:expr) => {
                     if !$seg.trim().is_empty() {
-                        let save = crate::appcfg::load_or_default().privacy.save_transcript_history;
+                        let save = {
+                            use tauri::Manager as _;
+                            ev_app
+                                .state::<crate::commands::AppHandle>()
+                                .config
+                                .lock()
+                                .unwrap()
+                                .privacy
+                                .save_transcript_history
+                        };
                         if save {
                             session_log_task.append(&crate::transcript_log::TranscriptRecord {
                                 ts: crate::commands::rfc3339_now(),
@@ -863,7 +881,7 @@ impl Engine {
                             }
 
                             TranslationEvent::OutputTranscriptDone => {
-                                // Task 8: sentence-boundary marker for target — flush tgt_seg.
+                                // Sentence-boundary marker for target: flush tgt_seg.
                                 flush_seg!(tgt_seg, "target", ev_tgt_lang);
                                 last_tgt_delta = None;
                             }
@@ -874,7 +892,7 @@ impl Engine {
                         }
                     }
 
-                    // Task 8: silence-gap fallback finalization.
+                    // Silence-gap finalization.
                     // Fires every 500 ms; if a segment has been accumulating for
                     // >= 1500 ms with no new delta, flush it now so segments
                     // persist even when the endpoint never sends *_transcript.done.
@@ -895,6 +913,8 @@ impl Engine {
                     }
                 }
             }
+            flush_seg!(src_seg, "source", "auto".to_string());
+            flush_seg!(tgt_seg, "target", ev_tgt_lang);
         });
         g.ev_task = Some(ev_task);
 
@@ -1084,21 +1104,30 @@ impl Engine {
         // and does not attempt to restart after the abort wakes it.
         self.session_active.store(false, Ordering::Release);
 
-        // Abort tasks first so they stop consuming from the channels.
+        // Abort transport first. Dropping its event sender lets ev_task drain
+        // and flush any partial transcript segment before the session log ends.
         if let Some(t) = g.realtime_task.take() {
-            t.abort();
-        }
-        if let Some(t) = g.ev_task.take() {
             t.abort();
         }
         if let Some(t) = g.pull_task.take() {
             t.abort();
         }
-        // Task 8: close the session log after tasks are aborted.
-        // The ev_task flushes segments on Closed events and the silence-gap
-        // timer; here we just close the file handle so no stale path carries
-        // into the next session.  Best-effort flush happened inside the task.
-        self.session_log.end();
+        if let Some(t) = g.ev_task.take() {
+            let session_log = Arc::clone(&self.session_log);
+            tauri::async_runtime::spawn(async move {
+                let mut ev_task = t;
+                tokio::select! {
+                    _ = &mut ev_task => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                        ev_task.abort();
+                        let _ = ev_task.await;
+                    }
+                }
+                session_log.end();
+            });
+        } else {
+            self.session_log.end();
+        }
         // Clear the uplink slot — graph loop will see None and drop frames.
         *self.uplink_slot.lock() = None;
         // Clear the original-queue slot and drain stale samples so no original

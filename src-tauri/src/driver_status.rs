@@ -46,13 +46,6 @@ pub fn visible_in_devices(devices: &crate::commands::AudioDevices) -> bool {
         .any(|d| d.name.to_ascii_lowercase().contains("intervox"))
 }
 
-/// Returns `false` until the ring-producer engine is wired in Phase 3.
-#[allow(dead_code)]
-pub fn ring_producer_active() -> bool {
-    // TODO(Task 3.2): report real engine ring-producer state
-    false
-}
-
 // ── Combined state ────────────────────────────────────────────────────────────
 
 /// Cheap startup state derived from the filesystem only. It never asks

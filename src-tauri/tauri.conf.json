@@ -39,7 +39,7 @@
     "macOS": {
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true,
-      "signingIdentity": "Developer ID Application: JHEN-KE LIN (5H75SGA7KP)"
+      "minimumSystemVersion": "14.0"
     }
   }
 }

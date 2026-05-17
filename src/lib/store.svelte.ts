@@ -72,7 +72,6 @@ class Store {
     verified: false,
     maskedKey: null,
     lastVerified: null,
-    usageUsd: 0,
     monthMinutes: 0,
     monthUsd: 0,
     totalMinutes: 0,
@@ -224,8 +223,7 @@ class Store {
   get sourceLang() {
     // The OpenAI realtime translation endpoint auto-detects the source
     // language; there is no user-facing selector. Always report auto-detect
-    // so the language-pair status text stays honest regardless of any stale
-    // `config.translation.source_language` value.
+    // so the language-pair status text stays honest.
     return SOURCE_LANGS[0];
   }
 
@@ -322,38 +320,46 @@ class Store {
   }
 
   async setSourceMic(id: string): Promise<void> {
-    await this.tryCmd(() => cmd.setSourceMic(id));
+    const ok = await this.tryCmd(() => cmd.setSourceMic(id));
+    if (!ok) return;
     if (this.config) this.config.audio.source_mic_id = id;
+    await this.refreshStatus();
   }
 
   async setLatencyPref(v: UiLatency): Promise<void> {
     const quality = latencyToQuality(v);
-    await this.tryCmd(() => cmd.setQualityMode(quality));
+    const ok = await this.tryCmd(() => cmd.setQualityMode(quality));
+    if (!ok) return;
     if (this.config) this.config.translation.quality_mode = quality;
   }
 
   async setMixPercent(n: number): Promise<void> {
     const clamped = Math.max(0, Math.min(30, n));
-    await this.tryCmd(() => cmd.setMixPercent(clamped));
+    const ok = await this.tryCmd(() => cmd.setMixPercent(clamped));
+    if (!ok) return;
     if (this.config) this.config.mix.original_voice_percent = clamped;
   }
 
   async setCaptions(patch: Partial<Config["captions"]>): Promise<void> {
     if (!this.config) return;
-    this.config.captions = { ...this.config.captions, ...patch };
-    await this.tryCmd(() => cmd.setCaptionsConfig(this.config!.captions));
-    this.captionsOpen = this.config.captions.enabled;
+    const next = { ...this.config.captions, ...patch };
+    const ok = await this.tryCmd(() => cmd.setCaptionsConfig(next));
+    if (!ok) return;
+    this.config.captions = next;
+    this.captionsOpen = next.enabled;
   }
 
   async setPrivacy(patch: Partial<Config["privacy"]>): Promise<void> {
     if (!this.config) return;
-    this.config.privacy = { ...this.config.privacy, ...patch };
-    const ok = await this.tryCmd(() => cmd.setPrivacyConfig(this.config!.privacy));
+    const next = { ...this.config.privacy, ...patch };
+    const ok = await this.tryCmd(() => cmd.setPrivacyConfig(next));
+    if (ok) this.config.privacy = next;
     this.pushToast(ok ? "success" : "error", ok ? "Privacy setting saved" : "Couldn't save setting");
   }
 
   async setShortcuts(s: Config["shortcuts"]): Promise<void> {
-    await this.tryCmd(() => cmd.setShortcuts(s));
+    const ok = await this.tryCmd(() => cmd.setShortcuts(s));
+    if (!ok) return;
     if (this.config) this.config.shortcuts = s;
   }
 
@@ -380,13 +386,16 @@ class Store {
   }
 
   async clearApiKey(): Promise<void> {
-    await this.tryCmd(() => cmd.clearApiKey());
+    const ok = await this.tryCmd(() => cmd.clearApiKey());
+    if (!ok) {
+      this.pushToast("error", "Couldn't remove the key");
+      return;
+    }
     this.account = {
       hasKey: false,
       verified: false,
       maskedKey: null,
       lastVerified: null,
-      usageUsd: 0,
       monthMinutes: 0,
       monthUsd: 0,
       totalMinutes: 0,
@@ -503,7 +512,8 @@ class Store {
   }
 
   async completeOnboarding(): Promise<void> {
-    await this.tryCmd(() => cmd.completeOnboarding());
+    const ok = await this.tryCmd(() => cmd.completeOnboarding());
+    if (!ok) return;
     if (this.config) this.config.onboarding_completed = true;
     this.onboardingOpen = false;
   }
@@ -531,8 +541,9 @@ class Store {
 
   async setUiConfig(patch: Partial<Config["ui"]>): Promise<void> {
     if (!this.config) return;
-    this.config.ui = { ...this.config.ui, ...patch };
-    const ok = await this.tryCmd(() => cmd.setUiConfig(this.config!.ui));
+    const next = { ...this.config.ui, ...patch };
+    const ok = await this.tryCmd(() => cmd.setUiConfig(next));
+    if (ok) this.config.ui = next;
     this.pushToast(ok ? "success" : "error", ok ? "Setting saved" : "Couldn't save setting");
   }
 

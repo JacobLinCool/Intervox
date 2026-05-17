@@ -1,7 +1,7 @@
 //! Tauri command surface (spec §4.1). The frontend never touches audio or
 //! OpenAI directly — every native operation goes through these. Device
-//! enumeration, config/secret persistence and key validation are real; the
-//! live audio engine and websocket transport are wired in later phases.
+//! enumeration, config/secret persistence, key validation, live audio routing,
+//! and websocket transport are all wired through this native command layer.
 
 use intervox_core::audio::mixer::MixSettings;
 use intervox_core::config::{AccountConfig, CaptionsConfig, PrivacyConfig, ShortcutsConfig};
@@ -111,12 +111,17 @@ fn sync_source_mic_name_from_devices(h: &AppHandle, devices: &AudioDevices) {
 
 /// Persist the current config to disk. Must be called **after** dropping any
 /// `MutexGuard` on `h.config` to avoid a deadlock.
-fn save_config(h: &AppHandle) {
-    crate::appcfg::persist(&h.config.lock().unwrap());
-}
-
-fn save_config_snapshot(cfg: &Config) {
-    crate::appcfg::persist(cfg);
+fn update_config<F>(h: &AppHandle, f: F) -> Result<Config, AppError>
+where
+    F: FnOnce(&mut Config),
+{
+    let mut guard = h.config.lock().unwrap();
+    let mut next = guard.clone();
+    f(&mut next);
+    next.validate()?;
+    crate::appcfg::persist(&next)?;
+    *guard = next.clone();
+    Ok(next)
 }
 
 // ── Tray helpers (pure, no Tauri runtime) ────────────────────────────────────
@@ -144,38 +149,33 @@ pub fn tray_menu_checks(current: VirtualMicMode) -> [bool; 4] {
 
 // ── DRY mode-application helper ───────────────────────────────────────────────
 
-/// Apply a mode change: update AppState, persist config, drive engine, emit
+/// Apply a mode change: persist config, update AppState, drive engine, emit
 /// `status-changed`, then refresh the tray title and checked-state.
 ///
 /// Takes plain refs (NOT `tauri::State`) so it can be called from both the
 /// `#[tauri::command]` (which resolves its `tauri::State` params first) and
 /// the tray `on_menu_event` closure (which resolves state via `app.state()`).
 ///
-/// Deadlock discipline: every `MutexGuard` is dropped before `save_config` and
-/// before `app.emit(...)`, matching the original command body.
 pub fn apply_mode(
     app: &tauri::AppHandle,
     h: &AppHandle,
     engine: &std::sync::Arc<crate::engine::Engine>,
     mode: VirtualMicMode,
-) {
-    // 1. Transition state (guard dropped immediately).
-    h.state.lock().unwrap().transition(mode);
-
-    // 2. Write mode string to config (guard dropped immediately).
-    h.config.lock().unwrap().audio.virtual_mic_mode = serde_json::to_value(mode)
+) -> Result<(), AppError> {
+    let mode_string = serde_json::to_value(mode)
         .unwrap()
         .as_str()
         .unwrap()
         .to_string();
 
-    // 3. Persist — no guards held.
-    save_config(h);
+    update_config(h, |cfg| {
+        cfg.audio.virtual_mic_mode = mode_string;
+    })?;
 
-    // 4. Drive engine.
+    h.state.lock().unwrap().transition(mode);
+
     engine.set_mode(mode);
 
-    // 5. Emit status — read status with a fresh lock, then drop before emit.
     let status = h.state.lock().unwrap().status.clone();
     {
         use tauri::Emitter;
@@ -198,6 +198,7 @@ pub fn apply_mode(
         let _ = tray_state.mode_translate.set_checked(checks[2]);
         let _ = tray_state.mode_translate_orig.set_checked(checks[3]);
     }
+    Ok(())
 }
 
 // ── Tray managed state ─────────────────────────────────────────────────────────
@@ -258,8 +259,7 @@ pub fn set_virtual_mic_mode(
     h: tauri::State<'_, AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    apply_mode(&app, &h, &engine, mode);
-    Ok(())
+    apply_mode(&app, &h, &engine, mode)
 }
 
 #[tauri::command]
@@ -287,9 +287,10 @@ pub fn set_source_mic(
     h: tauri::State<AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    h.config.lock().unwrap().audio.source_mic_id = Some(device_id.clone());
+    update_config(&h, |cfg| {
+        cfg.audio.source_mic_id = Some(device_id.clone());
+    })?;
     h.state.lock().unwrap().status.source_mic_name = Some(device_label_from_id(&device_id));
-    save_config(&h);
     engine.set_source_device(device_id);
     {
         use tauri::Emitter;
@@ -303,8 +304,9 @@ pub fn set_monitor_output(
     device_id: Option<String>,
     h: tauri::State<AppHandle>,
 ) -> Result<(), AppError> {
-    h.config.lock().unwrap().audio.monitor_output_id = device_id;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.audio.monitor_output_id = device_id;
+    })?;
     Ok(())
 }
 
@@ -317,14 +319,14 @@ pub fn set_target_language(
 ) -> Result<(), AppError> {
     // Clone what we need before dropping the guards.
     let tgt = {
-        let mut cfg = h.config.lock().unwrap();
-        cfg.translation.target_language = language.clone();
+        update_config(&h, |cfg| {
+            cfg.translation.target_language = language.clone();
+        })?;
         language.clone()
-    }; // config MutexGuard dropped
+    };
     {
         h.state.lock().unwrap().status.target_language = language;
     } // state MutexGuard dropped
-    save_config(&h);
     // Drive the engine — only restarts an active OpenAI session; no-op in Silence/PassThrough.
     engine.set_target_language(tgt);
     {
@@ -340,11 +342,10 @@ pub fn set_mix_settings(
     app: tauri::AppHandle,
     h: tauri::State<AppHandle>,
 ) -> Result<(), AppError> {
-    let mut cfg = h.config.lock().unwrap();
-    cfg.mix.duck_original = settings.duck_original;
-    cfg.audio.limiter_enabled = settings.limiter_enabled;
-    drop(cfg);
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.mix.duck_original = settings.duck_original;
+        cfg.audio.limiter_enabled = settings.limiter_enabled;
+    })?;
     {
         use tauri::Emitter;
         let _ = app.emit("status-changed", h.state.lock().unwrap().status.clone());
@@ -490,8 +491,7 @@ pub fn stop_all_audio(
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
     engine.stop_level_probe();
-    apply_mode(&app, &h, &engine, VirtualMicMode::Silence);
-    Ok(())
+    apply_mode(&app, &h, &engine, VirtualMicMode::Silence)
 }
 
 // ── Account / API key ────────────────────────────────────────────────────────
@@ -503,7 +503,6 @@ pub struct AccountStatus {
     pub verified: bool,
     pub masked_key: Option<String>,
     pub last_verified: Option<String>,
-    pub usage_usd: f64,
     pub month_minutes: f64,
     pub month_usd: f64,
     pub total_minutes: f64,
@@ -531,7 +530,6 @@ fn account_status(account: &AccountConfig) -> AccountStatus {
         verified: key.is_some() && account.openai_api_key_verified,
         masked_key: masked,
         last_verified: account.openai_api_key_last_verified.clone(),
-        usage_usd: u.total_usd(), // back-compat alias of total_usd (frontend `usageUsd`)
         month_minutes: u.month_minutes(),
         month_usd: u.month_usd(),
         total_minutes: u.total_minutes(),
@@ -547,14 +545,11 @@ pub fn get_account_status(h: tauri::State<AppHandle>) -> Result<AccountStatus, A
 #[tauri::command]
 pub fn set_api_key(h: tauri::State<AppHandle>, key: String) -> Result<AccountStatus, AppError> {
     let key = key.trim();
-    let cfg = {
-        let mut cfg = h.config.lock().unwrap();
+    let cfg = update_config(&h, |cfg| {
         cfg.account.openai_api_key = (!key.is_empty()).then(|| key.to_string());
         cfg.account.openai_api_key_verified = false;
         cfg.account.openai_api_key_last_verified = None;
-        cfg.clone()
-    };
-    save_config_snapshot(&cfg);
+    })?;
     Ok(account_status(&cfg.account))
 }
 
@@ -588,24 +583,46 @@ pub async fn verify_api_key(h: tauri::State<'_, AppHandle>) -> Result<AccountSta
 
     match classify_validation(http_status) {
         KeyValidation::Verified => {
+            let still_current = h
+                .config
+                .lock()
+                .unwrap()
+                .account
+                .openai_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                == Some(key.as_str());
+            if !still_current {
+                let cfg = h.config.lock().unwrap().clone();
+                return Ok(account_status(&cfg.account));
+            }
             let last_verified = rfc3339_now();
-            let cfg = {
-                let mut cfg = h.config.lock().unwrap();
+            let cfg = update_config(&h, |cfg| {
                 cfg.account.openai_api_key_verified = true;
                 cfg.account.openai_api_key_last_verified = Some(last_verified);
-                cfg.clone()
-            };
-            save_config_snapshot(&cfg);
+            })?;
             Ok(account_status(&cfg.account))
         }
         KeyValidation::InvalidKey => {
-            let cfg = {
-                let mut cfg = h.config.lock().unwrap();
+            let still_current = h
+                .config
+                .lock()
+                .unwrap()
+                .account
+                .openai_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                == Some(key.as_str());
+            if !still_current {
+                let cfg = h.config.lock().unwrap().clone();
+                return Ok(account_status(&cfg.account));
+            }
+            update_config(&h, |cfg| {
                 cfg.account.openai_api_key_verified = false;
                 cfg.account.openai_api_key_last_verified = None;
-                cfg.clone()
-            };
-            save_config_snapshot(&cfg);
+            })?;
             Err(AppError::openai_auth_error("Invalid API key"))
         }
         KeyValidation::Offline | KeyValidation::Unknown => {
@@ -654,12 +671,9 @@ fn unix_secs_to_utc(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
 
 #[tauri::command]
 pub fn clear_api_key(h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    let cfg = {
-        let mut cfg = h.config.lock().unwrap();
+    update_config(&h, |cfg| {
         cfg.account = AccountConfig::default();
-        cfg.clone()
-    };
-    save_config_snapshot(&cfg);
+    })?;
     Ok(())
 }
 
@@ -826,30 +840,34 @@ pub fn get_config(h: tauri::State<AppHandle>) -> Result<Config, AppError> {
 
 #[tauri::command]
 pub fn set_quality_mode(quality: String, h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    h.config.lock().unwrap().translation.quality_mode = quality;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.translation.quality_mode = quality;
+    })?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_mix_percent(percent: u32, h: tauri::State<AppHandle>) -> Result<(), AppError> {
     let clamped = percent.min(30);
-    h.config.lock().unwrap().mix.original_voice_percent = clamped;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.mix.original_voice_percent = clamped;
+    })?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_captions_config(c: CaptionsConfig, h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    h.config.lock().unwrap().captions = c;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.captions = c;
+    })?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_privacy_config(p: PrivacyConfig, h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    h.config.lock().unwrap().privacy = p;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.privacy = p;
+    })?;
     Ok(())
 }
 
@@ -859,8 +877,9 @@ pub fn set_shortcuts(
     app: tauri::AppHandle,
     h: tauri::State<AppHandle>,
 ) -> Result<(), AppError> {
-    h.config.lock().unwrap().shortcuts = s;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.shortcuts = s;
+    })?;
     // Re-register global shortcuts with the new config (drop the guard first).
     crate::shortcuts::register_shortcuts(&app);
     Ok(())
@@ -881,8 +900,9 @@ pub fn open_accessibility_settings() {
 
 #[tauri::command]
 pub fn complete_onboarding(h: tauri::State<AppHandle>) -> Result<(), AppError> {
-    h.config.lock().unwrap().onboarding_completed = true;
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.onboarding_completed = true;
+    })?;
     Ok(())
 }
 
@@ -972,9 +992,9 @@ pub fn set_ui_config(
     h: tauri::State<AppHandle>,
     engine: tauri::State<'_, std::sync::Arc<crate::engine::Engine>>,
 ) -> Result<(), AppError> {
-    h.config.lock().unwrap().ui = ui.clone();
-    // config MutexGuard dropped here before save_config acquires it again.
-    save_config(&h);
+    update_config(&h, |cfg| {
+        cfg.ui = ui.clone();
+    })?;
     crate::platform_integration::apply_ui_config(&app, &ui);
     // FIX-3d: propagate badge toggle to the pull_task atomic so the next ~1 Hz
     // tick uses the new value without any disk read.

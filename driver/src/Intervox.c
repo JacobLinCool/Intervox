@@ -89,19 +89,40 @@ static int gRingFD = -1;                       // poller-thread only
 static ino_t gRingIno = 0;                     // poller-thread only
 
 // One-slot deferred reclamation. ALL munmap/close happen on the poller
-// thread, and only one full poll tick (≥250 ms) AFTER the pointer was
-// unpublished from gRing. A DoIOOperation read lasts microseconds and only
-// occurs between Begin/EndIOOperation, so by free time no RT thread can still
-// hold the retired pointer — no lock needed on the realtime path.
+// thread. The realtime path increments gRingReaders before loading gRing and
+// decrements it after intervox_ring_read returns; the poller closes a retired
+// mapping only when that counter is zero. New IO cycles after gRing is
+// unpublished load NULL and output silence, so no lock or syscall is needed on
+// the realtime path.
 static intervox_ring_t* gPendingFree = NULL;   // poller-thread only
 static int gPendingFreeFD = -1;                // poller-thread only
 
+static _Atomic UInt32 gRingReaders = 0;
 static _Atomic bool gIOActive = false;
 static _Atomic bool gPollerRun = false;
 static pthread_t gPollerThread;
 
-// poller-thread only. Retire the currently published mapping (already assumes
-// gPendingFree was flushed at the top of this tick).
+// poller-thread only. Close a retired mapping after all realtime readers that
+// could have loaded it have exited.
+static void Ring_FlushPendingFree(void) {
+    if (gPendingFree != NULL &&
+        atomic_load_explicit(&gRingReaders, memory_order_acquire) == 0) {
+        intervox_ring_close(gPendingFree, gPendingFreeFD);
+        gPendingFree = NULL;
+        gPendingFreeFD = -1;
+    }
+}
+
+static bool Ring_HeaderIsValid(const intervox_ring_t* rb, const struct stat* st) {
+    return st->st_size >= (off_t)sizeof(intervox_ring_t) &&
+           rb->magic == INTERVOX_RING_MAGIC &&
+           rb->version == INTERVOX_RING_VERSION &&
+           rb->sample_rate == (uint32_t)kSampleRate &&
+           rb->channels == kChannelsPerFrame &&
+           rb->capacity_frames == INTERVOX_RING_CAPACITY;
+}
+
+// poller-thread only. Retire the currently published mapping.
 static void Ring_Retire(void) {
     intervox_ring_t* old = atomic_exchange_explicit(&gRing, NULL,
                                                     memory_order_acq_rel);
@@ -156,12 +177,7 @@ static void Diag_Write(const char* phase) {
 static void* Ring_PollerMain(void* arg) {
     (void)arg;
     while (atomic_load(&gPollerRun)) {
-        // 1) Free anything retired on a previous tick (now safe).
-        if (gPendingFree != NULL) {
-            intervox_ring_close(gPendingFree, gPendingFreeFD);
-            gPendingFree = NULL;
-            gPendingFreeFD = -1;
-        }
+        Ring_FlushPendingFree();
 
         if (atomic_load(&gIOActive)) {
             int fd = shm_open(INTERVOX_SHM_NAME, O_RDWR, 0666);
@@ -176,6 +192,7 @@ static void* Ring_PollerMain(void* arg) {
                 struct stat st;
                 bool need =
                     (fstat(fd, &st) == 0) &&
+                    st.st_size >= (off_t)sizeof(intervox_ring_t) &&
                     (atomic_load(&gRing) == NULL || st.st_ino != gRingIno);
                 if (need && gPendingFree == NULL) {
                     void* p = mmap(NULL, sizeof(intervox_ring_t),
@@ -185,8 +202,7 @@ static void* Ring_PollerMain(void* arg) {
                     }
                     if (p != MAP_FAILED) {
                         intervox_ring_t* rb = (intervox_ring_t*)p;
-                        if (rb->magic == INTERVOX_RING_MAGIC &&
-                            rb->version == INTERVOX_RING_VERSION) {
+                        if (Ring_HeaderIsValid(rb, &st)) {
                             Ring_Retire();
                             gRingFD = fd;
                             gRingIno = st.st_ino;
@@ -209,6 +225,13 @@ static void* Ring_PollerMain(void* arg) {
         }
         Diag_Write("poll");
         usleep(250000); // 250 ms — well off the realtime path
+    }
+    Ring_Retire();
+    while (gPendingFree != NULL) {
+        Ring_FlushPendingFree();
+        if (gPendingFree != NULL) {
+            usleep(1000);
+        }
     }
     return NULL;
 }
@@ -1238,6 +1261,7 @@ static OSStatus Ivx_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     if (ioMainBuffer == NULL) {
         return kAudioHardwareIllegalOperationError;
     }
+    atomic_fetch_add_explicit(&gRingReaders, 1, memory_order_acq_rel);
     intervox_ring_t* rb =
         atomic_load_explicit(&gRing, memory_order_acquire);
     atomic_fetch_add_explicit(&gDiag_DoIO, 1, memory_order_relaxed);
@@ -1248,6 +1272,7 @@ static OSStatus Ivx_DoIOOperation(AudioServerPlugInDriverRef inDriver,
                                   memory_order_relaxed);
     }
     intervox_ring_read(rb, (float*)ioMainBuffer, inIOBufferFrameSize);
+    atomic_fetch_sub_explicit(&gRingReaders, 1, memory_order_acq_rel);
     return noErr;
 }
 

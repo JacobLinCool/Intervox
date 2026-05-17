@@ -57,7 +57,6 @@ export const TARGET_LANGS: { code: string; name: string }[] = [
 export const COMMON_LANGS: { code: string; name: string }[] =
   TARGET_LANGS.filter((l) => ["en", "zh", "ja", "ko", "es", "fr"].includes(l.code));
 
-/* Alias for legacy refs; same as TARGET_LANGS in v1. */
 export const ALL_LANGS: { code: string; name: string }[] = TARGET_LANGS;
 
 export const SOURCE_LANGS: { code: string; name: string }[] = [

@@ -27,6 +27,28 @@
     onChange(Math.round(min + clamped * (max - min)));
   }
 
+  function commit(v: number) {
+    if (disabled) return;
+    onChange(Math.max(min, Math.min(max, Math.round(v))));
+  }
+
+  function handleKey(e: KeyboardEvent) {
+    const step = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+      e.preventDefault();
+      commit(value - step);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+      e.preventDefault();
+      commit(value + step);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      commit(min);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      commit(max);
+    }
+  }
+
   $effect(() => {
     if (!drag) return;
     const move = (e: MouseEvent) => handle(e);
@@ -50,6 +72,8 @@
   aria-valuemax={max}
   aria-valuenow={value}
   aria-disabled={disabled}
+  aria-orientation="horizontal"
+  onkeydown={handleKey}
   onmousedown={(e) => {
     drag = true;
     handle(e);

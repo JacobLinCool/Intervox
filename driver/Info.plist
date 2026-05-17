@@ -20,6 +20,8 @@
     <string>1</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
     <key>NSHumanReadableCopyright</key>
     <string>Intervox</string>
     <key>CFPlugInDynamicRegistration</key>

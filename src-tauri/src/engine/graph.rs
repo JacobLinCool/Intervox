@@ -13,7 +13,7 @@
 //! - `TranslateWithOriginal` additionally taps the 48 kHz mono frame into the
 //!   shared `original_queue` (bounded VecDeque) so the pull task can later mix
 //!   the delayed original under the translated audio (Task 4.3).
-//! - `Silence` (defensive — capture should not be running): drop frame.
+//! - `Silence` (unexpected while capture is running): drop frame.
 //!
 //! Keeping this function pure-ish (no I/O beyond the ring write) lets it be
 //! unit-tested without a real shared-memory ring.
@@ -178,7 +178,7 @@ pub(super) fn route_frame(
         sent_to_openai
     } else {
         ctx.uplink_chunker.clear();
-        // Silence (defensive): drop frame.
+        // Silence while capture is running: drop frame.
         ctx.out_level.store(0, Ordering::Relaxed);
         false
     }

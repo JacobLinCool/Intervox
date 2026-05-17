@@ -3,10 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.21.0",
+  "engines": {
+    "node": "24.2.0",
+    "pnpm": "10.21.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:app": "scripts/build_app.sh",
+    "build:app": "scripts/build_app.sh --release",
+    "build:app:dev": "scripts/build_app.sh",
     "build:app:release": "scripts/build_app.sh --release",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -14,17 +20,17 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2"
+    "@tauri-apps/api": "2.11.0"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^4",
-    "@tauri-apps/cli": "^2",
-    "@testing-library/svelte": "^5",
-    "jsdom": "^26",
-    "svelte": "^5",
-    "typescript": "^5",
-    "vite": "^5",
-    "svelte-check": "^4",
-    "vitest": "^3"
+    "@sveltejs/vite-plugin-svelte": "4.0.4",
+    "@tauri-apps/cli": "2.11.1",
+    "@testing-library/svelte": "5.3.1",
+    "jsdom": "26.1.0",
+    "svelte": "5.55.7",
+    "svelte-check": "4.4.8",
+    "typescript": "5.9.3",
+    "vite": "5.4.21",
+    "vitest": "3.2.4"
   }
 }

@@ -27,12 +27,12 @@ Authoritative docs:
 ## Requirements
 
 - macOS 14 Sonoma or later.
-- Rust stable toolchain.
+- Rust 1.94.0, pinned by `rust-toolchain.toml`.
 - Xcode Command Line Tools.
-- Node.js plus `pnpm`.
+- Node.js 24.2.0 plus pnpm 10.21.0.
 - `cmake` and `ninja` for the HAL driver.
-- Apple Developer ID Application certificate for signed driver builds.
-- Apple notarytool credentials for notarized release driver builds.
+- Apple Developer ID Application certificate for signed app and driver builds.
+- Apple notarytool credentials for notarized release app and driver builds.
 - OpenAI API key for live translation.
 
 ## Quick Start
@@ -65,8 +65,15 @@ Build the packaged macOS app:
 pnpm run build:app
 ```
 
-Build a release candidate with automated checks plus driver and app
-notarization:
+`build:app` is the release path and requires Developer ID plus notarytool
+credentials because the bundled driver must pass the app's install trust gate.
+For a local unsigned development package:
+
+```bash
+pnpm run build:app:dev
+```
+
+Build a release candidate explicitly:
 
 ```bash
 pnpm run build:app:release

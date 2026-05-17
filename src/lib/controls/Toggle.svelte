@@ -5,16 +5,18 @@
     value,
     onChange,
     tint = "var(--c-translate)",
+    ariaLabel = "Toggle setting",
   }: {
     value: boolean;
     onChange: (v: boolean) => void;
     tint?: string;
+    ariaLabel?: string;
   } = $props();
 </script>
 
 <button
   onclick={() => onChange(!value)}
-  aria-label={value ? "Toggle on" : "Toggle off"}
+  aria-label={ariaLabel}
   aria-pressed={value}
   style={css({
     width: 36,

@@ -27,19 +27,25 @@ pub fn load_or_default() -> Config {
 }
 
 /// Persist `cfg` to the platform config dir, creating the directory if needed.
-/// Errors are silently dropped — a failed save is logged nowhere for now but
-/// will not crash the app.
-pub fn persist(cfg: &Config) {
+pub fn persist(cfg: &Config) -> Result<(), intervox_core::AppError> {
     let p = config_path();
     if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| {
+            intervox_core::AppError::invalid_config(format!("cannot create config dir: {e}"))
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| {
+                    intervox_core::AppError::invalid_config(format!(
+                        "cannot protect config dir: {e}"
+                    ))
+                },
+            )?;
         }
     }
-    let _ = cfg.save(&p);
+    cfg.save(&p)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

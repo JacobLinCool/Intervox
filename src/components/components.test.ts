@@ -164,7 +164,7 @@ describe("Onboarding honest", () => {
     const originalRequest = store.requestMicPermission.bind(store);
 
     store.onboardingOpen = true;
-    store.account = { hasKey: true, verified: true, maskedKey: "sk-...", lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+    store.account = { hasKey: true, verified: true, maskedKey: "sk-...", lastVerified: null, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
     store.micPermission = "notDetermined";
     store.refreshMicPermission = async () => {};
     store.requestMicPermission = async () => {
@@ -185,7 +185,7 @@ describe("Onboarding honest", () => {
       store.refreshMicPermission = originalRefresh;
       store.requestMicPermission = originalRequest;
       store.onboardingOpen = false;
-      store.account = { hasKey: false, verified: false, maskedKey: null, lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+      store.account = { hasKey: false, verified: false, maskedKey: null, lastVerified: null, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
       store.micPermission = "notDetermined";
     }
   });
@@ -194,7 +194,7 @@ describe("Onboarding honest", () => {
     const originalRefresh = store.refreshMicPermission.bind(store);
 
     store.onboardingOpen = true;
-    store.account = { hasKey: true, verified: true, maskedKey: "sk-...", lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+    store.account = { hasKey: true, verified: true, maskedKey: "sk-...", lastVerified: null, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
     store.micPermission = "granted";
     store.refreshMicPermission = async () => {};
 
@@ -207,7 +207,7 @@ describe("Onboarding honest", () => {
     } finally {
       store.refreshMicPermission = originalRefresh;
       store.onboardingOpen = false;
-      store.account = { hasKey: false, verified: false, maskedKey: null, lastVerified: null, usageUsd: 0, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
+      store.account = { hasKey: false, verified: false, maskedKey: null, lastVerified: null, monthMinutes: 0, monthUsd: 0, totalMinutes: 0, totalUsd: 0 };
       store.micPermission = "notDetermined";
     }
   });

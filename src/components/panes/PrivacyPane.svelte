@@ -46,6 +46,7 @@
         <button class="btn" onclick={() => store.clearHistory()}>Clear history</button>
       {/if}
       <Toggle
+        ariaLabel="Toggle transcript history"
         value={store.config?.privacy.save_transcript_history ?? false}
         onChange={(v) => store.setPrivacy({ save_transcript_history: v })}
         tint="var(--c-mixed)"

@@ -15,7 +15,14 @@ pub const RING_BUFFER_CAPACITY: usize = 384_000;
 pub const LIVE_MAX_UNREAD_FRAMES: usize = 4_800;
 /// ASCII "IVOX".
 pub const RING_MAGIC: u32 = 0x49_56_4F_58;
-pub const RING_VERSION: u32 = 1;
+pub const RING_VERSION: u32 = 2;
+
+#[repr(C)]
+pub struct RingSlot {
+    sequence: AtomicU64,
+    bits: AtomicU32,
+    _pad: u32,
+}
 
 #[repr(C)]
 pub struct SharedAudioRingBuffer {
@@ -29,7 +36,7 @@ pub struct SharedAudioRingBuffer {
     pub generation: AtomicU64,
     pub mode: AtomicU32,
     _pad: u32,
-    frames: [AtomicU32; RING_BUFFER_CAPACITY],
+    slots: [RingSlot; RING_BUFFER_CAPACITY],
 }
 
 // Safe: every slot is atomic and indices are advanced monotonically. The
@@ -66,7 +73,11 @@ impl SharedAudioRingBuffer {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.magic == RING_MAGIC && self.version == RING_VERSION
+        self.magic == RING_MAGIC
+            && self.version == RING_VERSION
+            && self.sample_rate == 48_000
+            && self.channels == 1
+            && self.capacity_frames == RING_BUFFER_CAPACITY as u64
     }
 
     fn cap(&self) -> u64 {
@@ -85,8 +96,7 @@ impl SharedAudioRingBuffer {
         let start = w.saturating_sub(n as u64);
         let mut max_abs = 0.0f32;
         for i in 0..n {
-            let slot = ((start + i as u64) % self.cap()) as usize;
-            let sample = f32::from_bits(self.frames[slot].load(Ordering::Relaxed));
+            let sample = self.read_slot(start + i as u64).unwrap_or(0.0);
             max_abs = max_abs.max(sample.abs());
         }
         max_abs
@@ -120,6 +130,26 @@ impl SharedAudioRingBuffer {
         }
     }
 
+    fn write_slot(&self, index: u64, sample: f32) {
+        let slot = &self.slots[(index % self.cap()) as usize];
+        let seq = index << 1;
+        slot.sequence.store(seq | 1, Ordering::Release);
+        slot.bits.store(sample.to_bits(), Ordering::Relaxed);
+        slot.sequence.store(seq, Ordering::Release);
+    }
+
+    fn read_slot(&self, index: u64) -> Option<f32> {
+        let slot = &self.slots[(index % self.cap()) as usize];
+        let expected = index << 1;
+        let before = slot.sequence.load(Ordering::Acquire);
+        if before != expected {
+            return None;
+        }
+        let bits = slot.bits.load(Ordering::Relaxed);
+        let after = slot.sequence.load(Ordering::Acquire);
+        (after == before).then(|| f32::from_bits(bits))
+    }
+
     /// Producer side. Writes the newest samples and drops the oldest unread
     /// frames when necessary. A virtual microphone must stay current; preserving
     /// minutes-old unread audio is both incorrect and privacy-hostile.
@@ -143,8 +173,7 @@ impl SharedAudioRingBuffer {
         }
 
         for (i, &s) in data.iter().enumerate() {
-            let slot = ((w + i as u64) % self.cap()) as usize;
-            self.frames[slot].store(s.to_bits(), Ordering::Relaxed);
+            self.write_slot(w + i as u64, s);
         }
         self.write_index
             .store(w.wrapping_add(n as u64), Ordering::Release);
@@ -177,8 +206,7 @@ impl SharedAudioRingBuffer {
         let n = (out.len() as u64).min(avail) as usize;
         for (i, slot_out) in out.iter_mut().enumerate() {
             if (i as u64) < n as u64 {
-                let slot = ((r + i as u64) % self.cap()) as usize;
-                *slot_out = f32::from_bits(self.frames[slot].load(Ordering::Relaxed));
+                *slot_out = self.read_slot(r + i as u64).unwrap_or(0.0);
             } else {
                 *slot_out = 0.0;
             }
@@ -252,6 +280,7 @@ impl SharedRingMap {
                                                      // object must be group/other accessible. macOS honors the shm_open
                                                      // mode argument (subject to umask); `fchmod` on a shm fd returns
                                                      // EINVAL here, so the mode arg is the right lever.
+        let old_umask = unsafe { libc::umask(0) };
         let fd = unsafe {
             libc::shm_open(
                 cname.as_ptr(),
@@ -259,6 +288,7 @@ impl SharedRingMap {
                 0o666,
             )
         };
+        unsafe { libc::umask(old_umask) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -442,9 +472,10 @@ mod tests {
 
     #[test]
     fn shared_region_size_matches_c_layout() {
-        // header (56 bytes, all naturally aligned) + 384_000 * f32
-        assert_eq!(SHARED_REGION_BYTES, 56 + RING_BUFFER_CAPACITY * 4);
-        assert_eq!(SHARED_REGION_BYTES, 1_536_056);
+        // header (56 bytes) + 384_000 sequence-tagged slots (16 bytes each)
+        assert_eq!(std::mem::size_of::<RingSlot>(), 16);
+        assert_eq!(SHARED_REGION_BYTES, 56 + RING_BUFFER_CAPACITY * 16);
+        assert_eq!(SHARED_REGION_BYTES, 6_144_056);
     }
 
     #[cfg(unix)]
