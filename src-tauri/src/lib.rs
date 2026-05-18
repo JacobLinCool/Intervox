@@ -1,4 +1,5 @@
 mod appcfg;
+mod captions_overlay;
 mod commands;
 mod connection_log;
 mod devices;
@@ -657,8 +658,20 @@ pub fn run() {
                 ..
             } if label == "captions" => {
                 use tauri::Manager as _;
+                // Capture the final placement before the window is gone so it
+                // is remembered even when captions are being disabled.
+                commands::persist_captions_geometry_now(app_handle);
                 let h = app_handle.state::<commands::AppHandle>();
                 let _ = commands::record_captions_window_closed(app_handle, &h);
+            }
+
+            // ── Captions moved/resized → debounced placement persistence ─────
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_),
+                ..
+            } if label == "captions" => {
+                commands::schedule_persist_captions_geometry(app_handle);
             }
 
             #[cfg(target_os = "macos")]
