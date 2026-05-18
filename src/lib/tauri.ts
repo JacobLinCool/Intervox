@@ -82,6 +82,11 @@ export interface AccountStatus {
   monthMinutes: number; monthUsd: number; totalMinutes: number; totalUsd: number;
 }
 export type MicPermission = "granted" | "denied" | "notDetermined" | "restricted";
+export type NotificationPermission = "granted" | "denied" | "prompt" | "unsupported";
+export interface NotificationStatus {
+  permission: NotificationPermission;
+  inactivityMinutes: number;
+}
 export type DriverState = "missing" | "installedNotRunning" | "healthy" | "stale";
 export interface ConnLogEntry { ts: string; kind: string; detail: string }
 export interface MixSettings {
@@ -99,7 +104,10 @@ export interface Config {
   captions: { enabled: boolean; show_source: boolean; show_target: boolean;
               font_size: string; always_on_top: boolean };
   privacy: { save_transcript_history: boolean };
-  ui: { show_latency_badge: boolean; launch_at_login: boolean; hide_dock_icon: boolean };
+  ui: {
+    show_latency_badge: boolean; launch_at_login: boolean; hide_dock_icon: boolean;
+    inactivity_reminder_minutes: number;
+  };
   account: {
     openai_api_key: string | null;
     openai_api_key_verified: boolean;
@@ -153,6 +161,7 @@ export const cmd = {
   clearTranscriptHistory: () => invoke<number>("clear_transcript_history"),
   getConnectionLog: () => invoke<ConnLogEntry[]>("get_connection_log"),
   setUiConfig: (ui: Config["ui"]) => invoke("set_ui_config", { ui }),
+  getNotificationStatus: () => invoke<NotificationStatus>("get_notification_status"),
   openExternalUrl: (url: string) => invoke("open_external_url", { url }),
   appVersion: () => getVersion(),
   stopAllAudio: () => invoke("stop_all_audio"),
@@ -178,5 +187,7 @@ export const on = {
     listen<Config["captions"]>("captions-config-changed", (e) => f(e.payload)),
   error: (f: (err: AppError) => void) => listen<AppError>("error", (e) => f(e.payload)),
   transcriptCleared: (f: () => void) => listen("transcript-cleared", () => f()),
+  notificationPermission: (f: (p: NotificationPermission) => void) =>
+    listen<NotificationPermission>("notification-permission-changed", (e) => f(e.payload)),
 };
 export type { UnlistenFn };
