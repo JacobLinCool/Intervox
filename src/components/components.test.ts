@@ -38,7 +38,7 @@ describe("AudioPane", () => {
       },
       translation: { target_language: "en" },
       mix: { original_voice_percent: 0, translated_voice_percent: 100, duck_original: true },
-      captions: { enabled: true, show_source: true, show_target: true, font_size: "medium", always_on_top: true },
+      captions: { enabled: true, show_source: true, show_target: true, font_size: "medium", always_on_top: true, window_x: null, window_y: null, window_width: null },
       privacy: { save_transcript_history: true },
       ui: { show_latency_badge: false, launch_at_login: false, hide_dock_icon: false },
       account: { openai_api_key: null, openai_api_key_verified: false, openai_api_key_last_verified: null },

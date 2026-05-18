@@ -39,9 +39,16 @@ objc2-core-audio = { version = "0.3.2", default-features = false, features = ["A
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["CoreAudioBaseTypes", "std"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFArray", "CFDictionary", "CFNumber", "CFString", "std"] }
 objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWindow", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSString", "NSValue", "std"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+# `src-tauri` is intentionally its own crate (the root workspace `exclude`s it
+# so `cargo test --workspace` stays headless). Declaring an empty workspace
+# here makes that standalone status explicit and ancestor-independent, so the
+# crate also builds correctly from a nested git worktree checkout.
+[workspace]
