@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main Intervox desktop and captions window permissions.",
   "windows": ["main", "captions"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "notification:default"]
 }
