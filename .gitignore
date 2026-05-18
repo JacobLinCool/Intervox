@@ -27,3 +27,5 @@ driver/build/
 
 *.secret
 .DS_Store
+.claude
+.codex
