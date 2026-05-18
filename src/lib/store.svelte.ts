@@ -10,6 +10,7 @@ import type {
   Config,
   DriverState,
   MicPermission,
+  NotificationPermission,
 } from "./tauri";
 import {
   modeFromBackend, modeToBackend,
@@ -162,6 +163,9 @@ class Store {
 
   micPermission: MicPermission = $state("notDetermined");
   driverState: DriverState = $state("missing");
+  // Honest default before the backend probe resolves: "prompt" (undetermined),
+  // never a fabricated "granted".
+  notificationPermission: NotificationPermission = $state("prompt");
 
   srcText: string = $state("");
   tgtText: string = $state("");
@@ -231,6 +235,7 @@ class Store {
 
     try { this.appVersion = await cmd.appVersion(); } catch {}
 
+    void this.refreshNotificationStatus();
     void this.refreshDevices();
     void this.syncBackpressureMetrics();
   }
@@ -292,6 +297,9 @@ class Store {
     install("devices", () => on.devices((d) => { this.devices = d; }));
     install("captions-config", () => on.captionsConfig((captions) => {
       if (this.config) this.config = { ...this.config, captions };
+    }));
+    install("notification-permission", () => on.notificationPermission((p) => {
+      this.notificationPermission = p;
     }));
     install("error", () => on.error((e) => { this.lastError = e; }));
     // transcript-cleared: the Rust clear_transcript_history command has already
@@ -728,6 +736,25 @@ class Store {
     } catch {
       // leave existing value
     }
+  }
+
+  async refreshNotificationStatus(): Promise<void> {
+    try {
+      const s = await cmd.getNotificationStatus();
+      this.notificationPermission = s.permission;
+      // The backend is the source of truth for the persisted period; keep the
+      // config copy in sync if it drifted (e.g. clamped on load).
+      if (this.config) this.config.ui.inactivity_reminder_minutes = s.inactivityMinutes;
+    } catch {
+      // Non-critical: leave honest defaults; Interpret is unaffected.
+    }
+  }
+
+  // True when the OS will not show our (silent) reminders. Interpret keeps
+  // working regardless — this only drives an informational warning in the UI.
+  get notificationsBlocked(): boolean {
+    return this.notificationPermission === "denied"
+      || this.notificationPermission === "unsupported";
   }
 
   async startTest(): Promise<void> {

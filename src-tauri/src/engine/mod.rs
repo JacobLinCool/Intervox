@@ -365,6 +365,25 @@ pub struct Engine {
     /// `UiConfig::show_latency_badge`). Updated lock-free by `set_show_latency_badge`
     /// so the pull_task never needs to read config from disk.
     show_latency_badge: Arc<std::sync::atomic::AtomicBool>,
+
+    // ── Reminder source-of-truth (issue #2) ───────────────────────────────────
+    /// Process-relative monotonic clock base. All reminder timestamps below are
+    /// millis since this instant, so the notification dispatcher can read them
+    /// lock-free without sharing an `Instant`.
+    process_start: std::time::Instant,
+    /// Monotonic id of the current continuous Interpret/recording session.
+    /// Incremented in `start_openai_session_locked`, so every session — and
+    /// every mid-session restart (source/target change) — gets a fresh id.
+    /// The reminder tracker resets its de-dup state when this changes, which
+    /// is the single source of truth for "session changed".
+    session_generation: Arc<AtomicU64>,
+    /// `now_ms()` at session start; `0` when no session is active. Cleared in
+    /// `stop_openai_session_locked` so duration reminders reset on stop.
+    session_started_ms: Arc<AtomicU64>,
+    /// `now_ms()` of the last emitted `target-transcript-delta` (user-visible
+    /// interpreted text) for the current session; `0` until the first one.
+    /// This — not generic audio level — is the inactivity signal.
+    last_interpret_ms: Arc<AtomicU64>,
 }
 
 impl Engine {
@@ -559,6 +578,10 @@ impl Engine {
             show_latency_badge: Arc::new(std::sync::atomic::AtomicBool::new(
                 cfg.ui.show_latency_badge,
             )),
+            process_start: std::time::Instant::now(),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            session_started_ms: Arc::new(AtomicU64::new(0)),
+            last_interpret_ms: Arc::new(AtomicU64::new(0)),
         };
 
         if cfg.audio.output_preview_enabled {
@@ -582,6 +605,68 @@ impl Engine {
     /// holding any lock.
     pub fn uplink_persisted(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.uplink_persisted)
+    }
+
+    // ── Reminder source-of-truth (issue #2) ───────────────────────────────────
+
+    /// Millis since the engine's process-relative clock base.
+    fn now_ms(&self) -> u64 {
+        self.process_start.elapsed().as_millis() as u64
+    }
+
+    /// Mark the start of a new continuous Interpret/recording session.
+    /// Bumps the session generation, records the start time, and clears the
+    /// interpret-activity marker so the inactivity window is measured from
+    /// this session's start. Called from `start_openai_session_locked`.
+    fn mark_session_started(&self) {
+        // `.max(1)` so the stored value is never the "no session" sentinel 0,
+        // even in the (sub-millisecond) window right after process start.
+        self.session_started_ms
+            .store(self.now_ms().max(1), Ordering::Relaxed);
+        self.last_interpret_ms.store(0, Ordering::Relaxed);
+        self.session_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mark the current session as stopped. Called from
+    /// `stop_openai_session_locked` so duration/inactivity reminders reset.
+    fn mark_session_stopped(&self) {
+        self.session_started_ms.store(0, Ordering::Relaxed);
+        self.last_interpret_ms.store(0, Ordering::Relaxed);
+    }
+
+    /// Build a [`ReminderSnapshot`](crate::notifications::reminder::ReminderSnapshot)
+    /// from the engine's source-of-truth atomics. This is the only place the
+    /// notification dispatcher reads session/interpret state, keeping reminder
+    /// timekeeping tied to the same lifecycle as Interpret/recording.
+    pub fn reminder_snapshot(&self) -> crate::notifications::reminder::ReminderSnapshot {
+        use crate::notifications::reminder::ReminderSnapshot;
+        let started = self.session_started_ms.load(Ordering::Relaxed);
+        let active = self.session_active.load(Ordering::Relaxed);
+
+        // A live session requires both the active flag and a recorded start.
+        if !active || started == 0 {
+            return ReminderSnapshot {
+                session_id: None,
+                session_elapsed: std::time::Duration::ZERO,
+                interpret_active: false,
+                since_interpret_activity: None,
+            };
+        }
+
+        let now = self.now_ms().max(started);
+        let last = self.last_interpret_ms.load(Ordering::Relaxed);
+        // No interpreted text yet → measure the quiet window from session start
+        // so a session that never produces output still trips the reminder.
+        let activity_base = if last == 0 { started } else { last };
+
+        ReminderSnapshot {
+            session_id: Some(self.session_generation.load(Ordering::Relaxed)),
+            session_elapsed: std::time::Duration::from_millis(now - started),
+            interpret_active: true,
+            since_interpret_activity: Some(std::time::Duration::from_millis(
+                now.saturating_sub(activity_base),
+            )),
+        }
     }
 
     // ── Mode control ──────────────────────────────────────────────────────────
@@ -1249,6 +1334,10 @@ impl Engine {
         // immediately (avoids a race where the supervisor checks before the flag
         // is set and exits on the first iteration).
         self.session_active.store(true, Ordering::Release);
+        // Issue #2: a new continuous session starts here — bump the generation
+        // and reset the duration/inactivity clocks so reminders don't carry
+        // over from a previous session or a mid-session restart.
+        self.mark_session_started();
         let session_active_rt = Arc::clone(&self.session_active);
 
         // Spawn the supervisor task (Task 4.5).
@@ -1294,6 +1383,10 @@ impl Engine {
         // Stored as Arc<AtomicU32> so pull_task can read it lock-free.
         let first_audio_ms: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
         let ev_first_audio_ms = Arc::clone(&first_audio_ms);
+        // Issue #2: inactivity is tracked from user-visible interpreted text,
+        // not generic audio level — so update it from the transcript-delta arm.
+        let ev_last_interpret_ms = Arc::clone(&self.last_interpret_ms);
+        let ev_process_start = self.process_start;
         let ev_task = tauri::async_runtime::spawn(async move {
             // One resampler persisted across events so phase state carries across
             // chunk boundaries.  Default 24 000 → 48 000; the actual in_hz is
@@ -1424,6 +1517,12 @@ impl Engine {
                                 // Task 8: accumulate into tgt_seg for persistence.
                                 tgt_seg.push_str(&text);
                                 last_tgt_delta = Some(std::time::Instant::now());
+                                // Issue #2: user-visible interpreted text just
+                                // appeared — reset the inactivity window.
+                                ev_last_interpret_ms.store(
+                                    (ev_process_start.elapsed().as_millis() as u64).max(1),
+                                    Ordering::Relaxed,
+                                );
                             }
 
                             TranslationEvent::InputTranscriptDelta { text, .. } => {
@@ -1740,6 +1839,9 @@ impl Engine {
         // Signal the supervisor BEFORE aborting so it sees cancelled=true
         // and does not attempt to restart after the abort wakes it.
         self.session_active.store(false, Ordering::Release);
+        // Issue #2: session ended — clear the reminder clocks so a later
+        // session restarts duration/inactivity tracking from zero.
+        self.mark_session_stopped();
 
         // Abort transport first. Dropping its event sender lets ev_task drain
         // and flush any partial transcript segment before the session log ends.
