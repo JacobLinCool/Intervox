@@ -30,6 +30,10 @@ pub struct AppHandle {
     pub driver_state: Mutex<DriverState>,
     pub audio_enumeration_running: Arc<AtomicBool>,
     pub frontend_meter: Mutex<FrontendMeterDiagnostics>,
+    /// Monotonic counter used to debounce captions-window geometry persistence:
+    /// each move/resize bumps it, and a delayed task only writes if it is still
+    /// the latest generation.
+    pub captions_geom_gen: std::sync::atomic::AtomicU64,
 }
 
 impl AppHandle {
@@ -51,6 +55,7 @@ impl AppHandle {
             driver_state: Mutex::new(crate::driver_status::state_from_install_only()),
             audio_enumeration_running: Arc::new(AtomicBool::new(false)),
             frontend_meter: Mutex::new(FrontendMeterDiagnostics::default()),
+            captions_geom_gen: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1115,8 +1120,10 @@ pub fn complete_onboarding(
 const CAPTIONS_WINDOW_WIDTH: f64 = 640.0;
 const CAPTIONS_COMPACT_HEIGHT: f64 = 136.0;
 const CAPTIONS_EXPANDED_HEIGHT: f64 = 278.0;
-const CAPTIONS_MIN_WIDTH: f64 = 420.0;
-const CAPTIONS_MAX_WIDTH: f64 = 920.0;
+// Single source of truth for the width bounds lives in intervox-core so the
+// persisted-geometry clamp and the live window constraints cannot drift apart.
+const CAPTIONS_MIN_WIDTH: f64 = intervox_core::config::CAPTIONS_MIN_WIDTH;
+const CAPTIONS_MAX_WIDTH: f64 = intervox_core::config::CAPTIONS_MAX_WIDTH;
 
 fn emit_captions_config_changed(app: &tauri::AppHandle, captions: &CaptionsConfig) {
     use tauri::Emitter as _;
@@ -1125,33 +1132,49 @@ fn emit_captions_config_changed(app: &tauri::AppHandle, captions: &CaptionsConfi
 
 fn ensure_captions_window(
     app: &tauri::AppHandle,
-    always_on_top: bool,
+    captions: &CaptionsConfig,
     focus_existing: bool,
 ) -> Result<(), AppError> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
     if let Some(win) = app.get_webview_window("captions") {
-        let _ = win.set_always_on_top(always_on_top);
+        let _ = win.set_always_on_top(captions.always_on_top);
         let _ = win.show();
         if focus_existing {
             let _ = win.set_focus();
         }
+        // Re-assert the macOS fullscreen-overlay behavior; cheap and idempotent.
+        crate::captions_overlay::apply_overlay_behavior(app);
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, "captions", WebviewUrl::App("captions.html".into()))
-        .title("")
-        .decorations(false)
-        .always_on_top(always_on_top)
-        .transparent(true)
-        .skip_taskbar(true)
-        .inner_size(CAPTIONS_WINDOW_WIDTH, CAPTIONS_COMPACT_HEIGHT)
-        .min_inner_size(CAPTIONS_MIN_WIDTH, CAPTIONS_COMPACT_HEIGHT)
-        .max_inner_size(CAPTIONS_MAX_WIDTH, CAPTIONS_EXPANDED_HEIGHT)
-        .resizable(true)
-        .visible(true)
+    // Restore the user's last placement. Width is clamped in core; height stays
+    // compact because it is driven by the expand/collapse toggle, not config.
+    let (position, restored_width) = captions.restored_placement();
+    let width = restored_width.unwrap_or(CAPTIONS_WINDOW_WIDTH);
+
+    let mut builder =
+        WebviewWindowBuilder::new(app, "captions", WebviewUrl::App("captions.html".into()))
+            .title("")
+            .decorations(false)
+            .always_on_top(captions.always_on_top)
+            .transparent(true)
+            .skip_taskbar(true)
+            .inner_size(width, CAPTIONS_COMPACT_HEIGHT)
+            .min_inner_size(CAPTIONS_MIN_WIDTH, CAPTIONS_COMPACT_HEIGHT)
+            .max_inner_size(CAPTIONS_MAX_WIDTH, CAPTIONS_EXPANDED_HEIGHT)
+            .resizable(true)
+            .visible(true);
+    if let Some((x, y)) = position {
+        builder = builder.position(x, y);
+    }
+    builder
         .build()
         .map_err(|e| AppError::internal(format!("captions window: {e}")))?;
+
+    // macOS: lift the window into every Space, including another app's native
+    // fullscreen Space. No-op on other platforms.
+    crate::captions_overlay::apply_overlay_behavior(app);
     Ok(())
 }
 
@@ -1161,7 +1184,7 @@ fn sync_captions_window(
     focus_existing: bool,
 ) -> Result<(), AppError> {
     if captions.enabled {
-        ensure_captions_window(app, captions.always_on_top, focus_existing)
+        ensure_captions_window(app, captions, focus_existing)
     } else {
         do_close_captions_window(app)
     }
@@ -1170,10 +1193,18 @@ fn sync_captions_window(
 fn apply_captions_config(
     app: &tauri::AppHandle,
     h: &AppHandle,
-    captions: CaptionsConfig,
+    mut captions: CaptionsConfig,
 ) -> Result<(), AppError> {
     let previous = h.config.lock().unwrap().captions.clone();
     let focus_existing = captions.enabled && !previous.enabled;
+
+    // Window geometry is owned by the native move/resize path, not the
+    // settings UI. Carry the persisted placement forward so toggling a
+    // caption setting can never revert a freshly-moved window to a stale
+    // position the frontend happened to be holding.
+    captions.window_x = previous.window_x;
+    captions.window_y = previous.window_y;
+    captions.window_width = previous.window_width;
 
     update_config(h, |cfg| {
         cfg.captions = captions.clone();
@@ -1208,8 +1239,73 @@ pub fn toggle_captions_window(app: &tauri::AppHandle, h: &AppHandle) -> Result<(
 
 pub fn open_initial_captions_window(app: &tauri::AppHandle, captions: &CaptionsConfig) {
     if captions.enabled {
-        let _ = ensure_captions_window(app, captions.always_on_top, false);
+        let _ = ensure_captions_window(app, captions, false);
     }
+}
+
+/// Read the captions window's current logical placement, if it exists and the
+/// geometry can be queried. Width is clamped to the supported range.
+fn capture_captions_geometry(app: &tauri::AppHandle) -> Option<(f64, f64, f64)> {
+    use tauri::Manager as _;
+    let win = app.get_webview_window("captions")?;
+    let scale = win.scale_factor().ok()?;
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    let pos = win.outer_position().ok()?;
+    let size = win.inner_size().ok()?;
+    let x = pos.x as f64 / scale;
+    let y = pos.y as f64 / scale;
+    let width = intervox_core::config::clamp_captions_window_width(size.width as f64 / scale);
+    Some((x, y, width))
+}
+
+/// Persist the captions window placement immediately (no debounce, no
+/// `enabled` guard). Used right before the window is torn down so the last
+/// placement survives even when captions are being disabled.
+pub fn persist_captions_geometry_now(app: &tauri::AppHandle) {
+    use tauri::Manager as _;
+    let Some((x, y, width)) = capture_captions_geometry(app) else {
+        return;
+    };
+    let h = app.state::<AppHandle>();
+    let _ = update_config(&h, |cfg| {
+        cfg.captions.window_x = Some(x);
+        cfg.captions.window_y = Some(y);
+        cfg.captions.window_width = Some(width);
+    });
+    // Deliberately no `captions-config-changed` emit: geometry does not affect
+    // the rendered UI, and re-emitting would needlessly churn the frontend.
+}
+
+/// Schedule a debounced persist of the captions window placement. Every
+/// move/resize bumps a generation counter; only the latest one (after a quiet
+/// period) actually writes config, so a native drag does not hammer the disk.
+pub fn schedule_persist_captions_geometry(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager as _;
+
+    let generation = {
+        let h = app.state::<AppHandle>();
+        h.captions_geom_gen.fetch_add(1, Ordering::AcqRel) + 1
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let h = app.state::<AppHandle>();
+        if h.captions_geom_gen.load(Ordering::Acquire) != generation {
+            return; // superseded by a newer move/resize
+        }
+        // Skip geometry churn emitted while the window is being torn down.
+        // Bind to a local so the MutexGuard drops here (not across the
+        // persist call below, which re-locks the same config mutex).
+        let enabled = h.config.lock().unwrap().captions.enabled;
+        if !enabled {
+            return;
+        }
+        drop(h);
+        persist_captions_geometry_now(&app);
+    });
 }
 
 pub fn record_captions_window_closed(

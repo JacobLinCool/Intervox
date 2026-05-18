@@ -6,12 +6,15 @@
 
 <PaneTitle
   title="Captions"
-  sub="A compact always-on-top transcript window for meetings."
+  sub="A compact transcript window that floats over your meeting — even when the meeting app is fullscreen."
 />
 
 <FieldGroup title="Visibility">
   <Row>
-    <RowLabel title="Captions window" sub="Show the compact always-on-top transcript window." />
+    <RowLabel
+      title="Captions window"
+      sub="Floats above other windows and stays visible over a fullscreen meeting app on macOS. It remembers where you place and size it."
+    />
     <span style={css({ marginLeft: "auto" })}>
       <Toggle
         ariaLabel="Toggle captions window"
