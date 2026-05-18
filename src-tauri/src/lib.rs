@@ -4,6 +4,7 @@ mod connection_log;
 mod devices;
 mod driver_status;
 mod engine;
+mod notifications;
 mod permission;
 mod platform_integration;
 mod shortcuts;
@@ -362,6 +363,7 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(single_instance_guard)
         .manage(AppHandle::hydrated())
         .setup(|app| {
@@ -371,6 +373,11 @@ pub fn run() {
             let engine =
                 std::sync::Arc::new(crate::engine::Engine::new(app.handle().clone(), &cfg));
             app.manage(engine.clone());
+
+            // ── Desktop notification reminders (issue #2) ─────────────────────
+            // Spawns only background tasks; never blocks startup and requests
+            // notification permission off the startup path.
+            crate::notifications::init(app.handle(), engine.clone());
             let initial_mode = {
                 use tauri::Manager;
                 let h = app.state::<AppHandle>();
@@ -625,6 +632,7 @@ pub fn run() {
             commands::get_connection_log,
             commands::set_ui_config,
             commands::open_external_url,
+            notifications::get_notification_status,
         ]);
 
     let app = builder

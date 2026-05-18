@@ -123,12 +123,32 @@ pub struct AccountConfig {
     pub openai_api_key_last_verified: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// Default inactivity-reminder period in minutes (issue #2). `0` disables it.
+pub const DEFAULT_INACTIVITY_REMINDER_MINUTES: u32 = 10;
+/// Upper bound for the inactivity-reminder period (24 h).
+pub const MAX_INACTIVITY_REMINDER_MINUTES: u32 = 24 * 60;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub show_latency_badge: bool,
     pub launch_at_login: bool,
     pub hide_dock_icon: bool,
+    /// Minutes of no interpreted text before a silent inactivity reminder is
+    /// shown while Interpret is on. `0` disables the inactivity reminder.
+    /// The 1 h / 2 h / 3 h duration reminders are not configurable.
+    pub inactivity_reminder_minutes: u32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            show_latency_badge: false,
+            launch_at_login: false,
+            hide_dock_icon: false,
+            inactivity_reminder_minutes: DEFAULT_INACTIVITY_REMINDER_MINUTES,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,6 +253,10 @@ impl Config {
         }
         self.mix.original_voice_percent = self.mix.original_voice_percent.min(30);
         self.mix.translated_voice_percent = self.mix.translated_voice_percent.min(100);
+        self.ui.inactivity_reminder_minutes = self
+            .ui
+            .inactivity_reminder_minutes
+            .min(MAX_INACTIVITY_REMINDER_MINUTES);
         Ok(())
     }
 }
@@ -331,5 +355,37 @@ mod tests {
         assert!(!c.ui.show_latency_badge);
         assert!(!c.ui.launch_at_login);
         assert!(!c.ui.hide_dock_icon);
+        assert_eq!(
+            c.ui.inactivity_reminder_minutes,
+            DEFAULT_INACTIVITY_REMINDER_MINUTES
+        );
+    }
+
+    #[test]
+    fn inactivity_reminder_minutes_defaults_when_missing_from_json() {
+        // Older configs written before issue #2 have no ui.inactivity field;
+        // they must come back with the sensible default, not 0 (disabled).
+        let cfg: Config =
+            serde_json::from_str(r#"{"version":1,"ui":{"show_latency_badge":true}}"#).unwrap();
+        assert!(cfg.ui.show_latency_badge);
+        assert_eq!(
+            cfg.ui.inactivity_reminder_minutes,
+            DEFAULT_INACTIVITY_REMINDER_MINUTES
+        );
+    }
+
+    #[test]
+    fn validate_clamps_inactivity_reminder_minutes() {
+        let mut c = Config::default();
+        c.ui.inactivity_reminder_minutes = 999_999;
+        c.validate().unwrap();
+        assert_eq!(
+            c.ui.inactivity_reminder_minutes,
+            MAX_INACTIVITY_REMINDER_MINUTES
+        );
+        // 0 (disabled) is valid and preserved.
+        c.ui.inactivity_reminder_minutes = 0;
+        c.validate().unwrap();
+        assert_eq!(c.ui.inactivity_reminder_minutes, 0);
     }
 }

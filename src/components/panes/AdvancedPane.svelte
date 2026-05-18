@@ -1,10 +1,29 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
-  import { PaneTitle, FieldGroup, Row, RowLabel, Toggle } from "$lib/controls";
+  import { PaneTitle, FieldGroup, Row, RowLabel, Toggle, Pulldown } from "$lib/controls";
   import { css } from "$lib/util";
   import ConnectionLogModal from "../ConnectionLogModal.svelte";
 
   let showLog = $state(false);
+
+  const INACTIVITY_OPTIONS = [
+    { value: 0, label: "Off" },
+    { value: 5, label: "5 minutes" },
+    { value: 10, label: "10 minutes" },
+    { value: 15, label: "15 minutes" },
+    { value: 30, label: "30 minutes" },
+    { value: 60, label: "60 minutes" },
+  ];
+
+  const notifyStatusText = $derived(
+    store.notificationPermission === "denied"
+      ? "Denied — enable Intervox in System Settings ▸ Notifications to receive these reminders."
+      : store.notificationPermission === "unsupported"
+        ? "Unavailable on this system. Interpret still works normally."
+        : store.notificationPermission === "granted"
+          ? "Allowed — reminders show silently, with no alert sound."
+          : "Waiting for permission…",
+  );
 
   const captureDrops = $derived(
     store.backpressure.capturePoolMisses
@@ -49,6 +68,43 @@
     />
     <span style={css({ marginLeft: "auto" })}>
       <button class="btn" onclick={() => store.clearHistory()}>Clear history</button>
+    </span>
+  </Row>
+</FieldGroup>
+
+<FieldGroup title="Notifications">
+  <Row>
+    <RowLabel
+      title="Long-session reminders"
+      sub="Silent desktop notifications at 1, 2, and 3 hours of continuous Interpret."
+    />
+  </Row>
+  <Row>
+    <RowLabel
+      title="Inactivity reminder"
+      sub="Notify when Interpret is on but no speech has been interpreted for this long."
+    />
+    <span style={css({ marginLeft: "auto" })}>
+      <Pulldown
+        width={150}
+        value={store.config?.ui.inactivity_reminder_minutes ?? 10}
+        options={INACTIVITY_OPTIONS}
+        onChange={(v) => store.setUiConfig({ inactivity_reminder_minutes: v })}
+      />
+    </span>
+  </Row>
+  <Row last>
+    <RowLabel title="Permission" sub={notifyStatusText} />
+    <span style={css({ marginLeft: "auto" })}>
+      <span
+        style={css({
+          fontSize: 12,
+          fontWeight: 600,
+          color: store.notificationsBlocked ? "var(--c-error)" : "var(--txt-2)",
+        })}
+      >
+        {store.notificationsBlocked ? "Blocked" : "OK"}
+      </span>
     </span>
   </Row>
 </FieldGroup>
