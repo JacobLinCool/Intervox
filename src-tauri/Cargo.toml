@@ -46,9 +46,3 @@ tauri-plugin-notification = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-
-# `src-tauri` is intentionally its own crate (the root workspace `exclude`s it
-# so `cargo test --workspace` stays headless). Declaring an empty workspace
-# here makes that standalone status explicit and ancestor-independent, so the
-# crate also builds correctly from a nested git worktree checkout.
-[workspace]
