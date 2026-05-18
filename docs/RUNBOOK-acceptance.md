@@ -237,6 +237,50 @@ Each step maps 1:1 to one item in the `docs/STATUS.md` "## Product Acceptance" s
 
 ---
 
+### A5b — Captions stay over a fullscreen meeting app and remember placement
+
+This step covers GitHub issue #3. It is inherently manual: it needs another app
+in a real macOS native fullscreen Space, which CI cannot emulate.
+
+**Action.**
+1. With the captions window open (A5), drag it by its header to a corner and
+   resize its width to a non-default size. Wait ~1 s (geometry persistence is
+   debounced ~500 ms).
+2. Put a meeting app into macOS **native fullscreen** (green traffic-light
+   button / `Ctrl+Cmd+F`), e.g. Zoom in a call, or Google Meet fullscreen in
+   the browser. This creates a dedicated fullscreen Space.
+3. Observe the captions window while the meeting app is fullscreen.
+4. With the meeting app still fullscreen, toggle captions off and on again with
+   the global shortcut **Cmd+Shift+C**, then with the tray **Captions** item.
+5. Swipe between Spaces (`Ctrl+←/→`) and back to the fullscreen Space.
+6. Take the meeting app out of fullscreen and back in.
+7. Quit Intervox (**Cmd+Q**), relaunch it, and reopen captions.
+
+**Expected observation.**
+- The captions window remains visible floating above the fullscreen meeting
+  app in its dedicated Space (it is not hidden behind it and does not vanish).
+- Toggling captions from the global shortcut and from the tray while the
+  meeting app is fullscreen shows the window in the active fullscreen Space —
+  it does not yank you out to another Space.
+- Switching Spaces and entering/exiting the meeting app's fullscreen keeps the
+  captions behaving consistently (still visible, still on top).
+- The window keeps its transparent, decorless, draggable look throughout.
+- After relaunch, the captions window reappears at the position and width set
+  in step 1 (height is governed by the compact/expanded toggle, not persisted).
+
+If macOS ever refuses to place the window in the fullscreen Space, it fails
+honestly (the window simply does not appear there) — there is no half-working
+fallback. Note that observation in the runbook result table.
+
+**PASS criterion.** Captions remain visible and usable over a fullscreen
+meeting app across Space switches and fullscreen enter/exit, the tray/shortcut
+toggle works while fullscreen, and the window position/width persist across an
+app restart.
+
+- [ ] **A5b PASS**
+
+---
+
 ### A6 — App quit keeps the virtual mic device available and silent
 
 **Action.**
@@ -448,6 +492,7 @@ Fill in this table after completing all steps. Date, tester name, and SHA of the
 | A3 Interpret | | |
 | A4 Interpret original voice mix | | |
 | A5 Captions live | | |
+| A5b Captions over fullscreen + placement persists | | |
 | A6 App quit keeps vmic | | |
 | A7 Driver + app restart | | |
 | A8 Runtime logs contain no raw audio/transcripts/keys | | |

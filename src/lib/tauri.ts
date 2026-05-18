@@ -102,7 +102,9 @@ export interface Config {
   translation: { target_language: string };
   mix: { original_voice_percent: number; translated_voice_percent: number; duck_original: boolean };
   captions: { enabled: boolean; show_source: boolean; show_target: boolean;
-              font_size: string; always_on_top: boolean };
+              font_size: string; always_on_top: boolean;
+              window_x: number | null; window_y: number | null;
+              window_width: number | null };
   privacy: { save_transcript_history: boolean };
   ui: {
     show_latency_badge: boolean; launch_at_login: boolean; hide_dock_icon: boolean;

@@ -79,6 +79,21 @@ impl Default for MixConfig {
     }
 }
 
+/// Logical-pixel bounds for the captions window width. Kept here (not just in
+/// the Tauri layer) so persisted geometry can be clamped before it is ever
+/// applied to a window, and so the clamp is unit-testable without a GUI.
+pub const CAPTIONS_MIN_WIDTH: f64 = 420.0;
+pub const CAPTIONS_MAX_WIDTH: f64 = 920.0;
+
+/// Clamp a persisted/raw captions window width into the supported range.
+/// Non-finite input (NaN/inf from a corrupt config) falls back to the min.
+pub fn clamp_captions_window_width(width: f64) -> f64 {
+    if !width.is_finite() {
+        return CAPTIONS_MIN_WIDTH;
+    }
+    width.clamp(CAPTIONS_MIN_WIDTH, CAPTIONS_MAX_WIDTH)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptionsConfig {
@@ -86,7 +101,16 @@ pub struct CaptionsConfig {
     pub show_source: bool,
     pub show_target: bool,
     pub font_size: String,
+    /// Keep the captions window above other windows and visible over another
+    /// app's native macOS fullscreen Space (see `captions_overlay`).
     pub always_on_top: bool,
+    /// Persisted window placement (logical pixels). `None` until the user has
+    /// moved/resized the window at least once, in which case the OS default
+    /// placement is used. Height is intentionally not persisted because it is
+    /// driven by the compact/expanded toggle.
+    pub window_x: Option<f64>,
+    pub window_y: Option<f64>,
+    pub window_width: Option<f64>,
 }
 
 impl Default for CaptionsConfig {
@@ -97,7 +121,24 @@ impl Default for CaptionsConfig {
             show_target: true,
             font_size: "medium".into(),
             always_on_top: true,
+            window_x: None,
+            window_y: None,
+            window_width: None,
         }
+    }
+}
+
+impl CaptionsConfig {
+    /// Restored placement to apply when (re)creating the window: `(x, y)` is
+    /// only returned when both coordinates are present; width is clamped to the
+    /// supported range. Returns `None` for each part that was never persisted.
+    pub fn restored_placement(&self) -> (Option<(f64, f64)>, Option<f64>) {
+        let position = match (self.window_x, self.window_y) {
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some((x, y)),
+            _ => None,
+        };
+        let width = self.window_width.map(clamp_captions_window_width);
+        (position, width)
     }
 }
 
@@ -387,5 +428,69 @@ mod tests {
         c.ui.inactivity_reminder_minutes = 0;
         c.validate().unwrap();
         assert_eq!(c.ui.inactivity_reminder_minutes, 0);
+    }
+
+    #[test]
+    fn captions_geometry_defaults_unset() {
+        let c = CaptionsConfig::default();
+        assert_eq!(c.window_x, None);
+        assert_eq!(c.window_y, None);
+        assert_eq!(c.window_width, None);
+        let (pos, width) = c.restored_placement();
+        assert_eq!(pos, None);
+        assert_eq!(width, None);
+    }
+
+    #[test]
+    fn clamp_captions_window_width_bounds() {
+        assert_eq!(clamp_captions_window_width(100.0), CAPTIONS_MIN_WIDTH);
+        assert_eq!(clamp_captions_window_width(5000.0), CAPTIONS_MAX_WIDTH);
+        assert_eq!(clamp_captions_window_width(640.0), 640.0);
+        // Corrupt config values must not propagate NaN/inf into the window API.
+        assert_eq!(clamp_captions_window_width(f64::NAN), CAPTIONS_MIN_WIDTH);
+        assert_eq!(
+            clamp_captions_window_width(f64::INFINITY),
+            CAPTIONS_MIN_WIDTH
+        );
+    }
+
+    #[test]
+    fn restored_placement_clamps_width_and_requires_both_coords() {
+        let c = CaptionsConfig {
+            window_x: Some(120.0),
+            window_y: None,
+            window_width: Some(99_999.0),
+            ..Default::default()
+        };
+        let (pos, width) = c.restored_placement();
+        // y missing → position not restored, but a clamped width still is.
+        assert_eq!(pos, None);
+        assert_eq!(width, Some(CAPTIONS_MAX_WIDTH));
+
+        let c2 = CaptionsConfig {
+            window_x: Some(-40.0),
+            window_y: Some(64.0),
+            window_width: Some(700.0),
+            ..Default::default()
+        };
+        let (pos2, width2) = c2.restored_placement();
+        assert_eq!(pos2, Some((-40.0, 64.0)));
+        assert_eq!(width2, Some(700.0));
+    }
+
+    #[test]
+    fn captions_geometry_round_trips_through_json() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("intervox-cap-geom-{}.json", std::process::id()));
+        let mut c = Config::default();
+        c.captions.window_x = Some(12.5);
+        c.captions.window_y = Some(48.0);
+        c.captions.window_width = Some(733.0);
+        c.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.captions.window_x, Some(12.5));
+        assert_eq!(loaded.captions.window_y, Some(48.0));
+        assert_eq!(loaded.captions.window_width, Some(733.0));
+        let _ = std::fs::remove_file(&path);
     }
 }
