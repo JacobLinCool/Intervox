@@ -136,7 +136,7 @@ pub struct UiConfig {
     pub hide_dock_icon: bool,
     /// Minutes of no interpreted text before a silent inactivity reminder is
     /// shown while Interpret is on. `0` disables the inactivity reminder.
-    /// The 1 h / 2 h / 3 h duration reminders are not configurable.
+    /// The recurring hourly duration reminder is not configurable.
     pub inactivity_reminder_minutes: u32,
 }
 
