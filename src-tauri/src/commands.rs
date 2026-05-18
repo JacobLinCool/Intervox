@@ -1297,13 +1297,13 @@ pub fn schedule_persist_captions_geometry(app: &tauri::AppHandle) {
             return; // superseded by a newer move/resize
         }
         // Skip geometry churn emitted while the window is being torn down.
-        // Bind to a local so the MutexGuard drops here (not across the
-        // persist call below, which re-locks the same config mutex).
+        // Bind to a local so the MutexGuard drops at the `;` here, before the
+        // persist call below re-locks the same config mutex. (`h` itself is a
+        // lock-free `State` handle, so it needs no explicit drop.)
         let enabled = h.config.lock().unwrap().captions.enabled;
         if !enabled {
             return;
         }
-        drop(h);
         persist_captions_geometry_now(&app);
     });
 }
