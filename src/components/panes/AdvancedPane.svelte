@@ -76,7 +76,7 @@
   <Row>
     <RowLabel
       title="Long-session reminders"
-      sub="Silent desktop notifications at 1, 2, and 3 hours of continuous Interpret."
+      sub="A silent desktop notification every hour of continuous Interpret."
     />
   </Row>
   <Row>
