@@ -286,6 +286,56 @@ describe("Onboarding honest", () => {
 
 import CaptionsWindow from "../CaptionsWindow.svelte";
 import { render as rCW } from "@testing-library/svelte";
+
+// A complete Config so the store's derived getters (targetLang, mixPercent, …)
+// never hit an undefined nested field during render. `show_source` is toggled
+// per test.
+function captionsWindowConfig(showSource: boolean) {
+  return {
+    version: 1,
+    audio: { source_id: null, output_preview_enabled: false, virtual_mic_mode: "silence", input_gain_db: 0, limiter_enabled: true },
+    translation: { target_language: "en" },
+    mix: { original_voice_percent: 0, translated_voice_percent: 100, duck_original: true },
+    captions: { enabled: true, show_source: showSource, show_target: true, font_size: "medium", always_on_top: true, window_x: null, window_y: null, window_width: null },
+    privacy: { save_transcript_history: true },
+    ui: { show_latency_badge: false, launch_at_login: false, hide_dock_icon: false },
+    account: { openai_api_key: null, openai_api_key_verified: false, openai_api_key_last_verified: null },
+    shortcuts: { toggle_translate: "Cmd+Shift+T", silence: "Cmd+Shift+M", captions: "Cmd+Shift+C" },
+    onboarding_completed: true,
+  };
+}
+
+// These tests assert what the captions window renders, which depends on
+// translating state + caption text. The store is a module singleton, so set
+// the exact state each test needs and restore it after instead of relying on
+// whatever a previously-run test happened to leave behind.
+function withCaptionsStore(
+  cfg: ReturnType<typeof captionsWindowConfig> | null,
+  body: () => void,
+) {
+  const prev = {
+    config: store.config,
+    status: store.status,
+    lastError: store.lastError,
+    srcText: store.srcText,
+    tgtText: store.tgtText,
+  };
+  store.config = cfg as any;
+  store.status = null as any; // status?.mode undefined → mode "translate"
+  store.lastError = null; // no error → isTranslating true
+  store.srcText = "";
+  store.tgtText = "";
+  try {
+    body();
+  } finally {
+    store.config = prev.config;
+    store.status = prev.status;
+    store.lastError = prev.lastError;
+    store.srcText = prev.srcText;
+    store.tgtText = prev.tgtText;
+  }
+}
+
 describe("CaptionsWindow", () => {
   it("renders the pop-out container with data-captions-window", () => {
     const { container } = rCW(CaptionsWindow as any);
@@ -293,14 +343,18 @@ describe("CaptionsWindow", () => {
   });
 
   it("shows 'Waiting for translation' placeholder when store is empty", () => {
-    const { container } = rCW(CaptionsWindow as any);
-    expect(container.innerHTML).toContain("Waiting for translation");
+    withCaptionsStore(null, () => {
+      const { container } = rCW(CaptionsWindow as any);
+      expect(container.innerHTML).toContain("Waiting for translation");
+    });
   });
 
   it("renders compact source placeholder as the second caption line", () => {
-    const { container } = rCW(CaptionsWindow as any);
-    expect(container.innerHTML).toContain("Waiting for speech");
-    expect(container.querySelector(".compact")).not.toBeNull();
+    withCaptionsStore(captionsWindowConfig(true), () => {
+      const { container } = rCW(CaptionsWindow as any);
+      expect(container.innerHTML).toContain("Waiting for speech");
+      expect(container.querySelector(".compact")).not.toBeNull();
+    });
   });
 
   it("toggles expanded layout from the caption window control", async () => {
