@@ -3,13 +3,15 @@
 #
 # Default mode builds a developer package. Use `--release` for a distributable
 # build: it runs the automated checks, notarizes/staples the driver before
-# packaging, then notarizes/staples the final Intervox.app bundle.
+# packaging, notarizes/staples the final Intervox.app bundle, then wraps it in
+# a signed + notarized + stapled Intervox-<version>.dmg for distribution.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/driver_env.sh"
 
 RUN_CHECKS=0
 NOTARIZE_DRIVER=0
 NOTARIZE_APP=0
+BUILD_DMG=0
 
 usage() {
     cat <<'EOF'
@@ -20,11 +22,14 @@ Options:
   --notarize-driver  Notarize and staple driver/build/Intervox.driver before packaging.
   --notarize-app     Notarize and staple the built Intervox.app.
                      This also notarizes the driver first.
-  --release          Equivalent to --checks --notarize-driver --notarize-app.
+  --dmg              Wrap the built Intervox.app in a signed Intervox-<version>.dmg.
+                     With --notarize-app (or --release) the DMG is also
+                     notarized and stapled.
+  --release          Equivalent to --checks --notarize-driver --notarize-app --dmg.
   -h, --help         Show this help.
 
 Environment:
-  SIGN_IDENTITY      Developer ID Application identity used for both driver and app signing.
+  SIGN_IDENTITY      Developer ID Application identity used for driver, app, and DMG signing.
   NOTARY_PROFILE    notarytool credentials profile. Default: intervox-notary.
 EOF
 }
@@ -41,10 +46,14 @@ while [[ $# -gt 0 ]]; do
             NOTARIZE_DRIVER=1
             NOTARIZE_APP=1
             ;;
+        --dmg)
+            BUILD_DMG=1
+            ;;
         --release)
             RUN_CHECKS=1
             NOTARIZE_DRIVER=1
             NOTARIZE_APP=1
+            BUILD_DMG=1
             ;;
         --)
             ;;
@@ -85,6 +94,10 @@ need_cmd pnpm
 if [[ "$NOTARIZE_DRIVER" -eq 1 || "$NOTARIZE_APP" -eq 1 ]]; then
     need_cmd spctl
     need_cmd xcrun
+fi
+
+if [[ "$BUILD_DMG" -eq 1 ]]; then
+    need_cmd hdiutil
 fi
 
 APP_BUNDLE="$REPO_ROOT/src-tauri/target/release/bundle/macos/Intervox.app"
@@ -152,5 +165,21 @@ if [[ "$NOTARIZE_APP" -eq 1 ]]; then
     spctl -a -vvv -t execute "$APP_BUNDLE"
 fi
 
+DMG_PATH=""
+if [[ "$BUILD_DMG" -eq 1 ]]; then
+    run "$REPO_ROOT/scripts/make_dmg.sh" "$APP_BUNDLE"
+
+    VERSION="$(/usr/bin/plutil -extract version raw -o - \
+        "$REPO_ROOT/src-tauri/tauri.conf.json")"
+    DMG_PATH="$REPO_ROOT/src-tauri/target/release/bundle/dmg/Intervox-${VERSION}.dmg"
+
+    if [[ "$NOTARIZE_APP" -eq 1 ]]; then
+        run "$REPO_ROOT/scripts/notarize_dmg.sh" "$DMG_PATH"
+    fi
+fi
+
 echo
 echo "Built app: $APP_BUNDLE"
+if [[ -n "$DMG_PATH" ]]; then
+    echo "Built DMG: $DMG_PATH"
+fi
