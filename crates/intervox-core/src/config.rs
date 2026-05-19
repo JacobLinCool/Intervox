@@ -162,6 +162,24 @@ pub struct AccountConfig {
     pub openai_api_key: Option<String>,
     pub openai_api_key_verified: bool,
     pub openai_api_key_last_verified: Option<String>,
+    /// Optional override for the Realtime Translation WebSocket endpoint.
+    /// When set, Intervox connects here instead of the default OpenAI URL,
+    /// which lets it talk to any wire-compatible server (e.g. a self-hosted
+    /// `open-realtime-translate` instance). A full `ws://` / `wss://` URL,
+    /// including the `?model=` query, is expected. `None` ⇒ use the default
+    /// OpenAI endpoint and require a verified API key.
+    pub realtime_endpoint: Option<String>,
+}
+
+impl AccountConfig {
+    /// The configured custom endpoint, trimmed, only if it is non-empty.
+    /// Returns `None` for the default OpenAI endpoint.
+    pub fn custom_realtime_endpoint(&self) -> Option<&str> {
+        self.realtime_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// Default inactivity-reminder period in minutes (issue #2). `0` disables it.
@@ -322,6 +340,8 @@ mod tests {
         assert!(c.privacy.save_transcript_history);
         assert!(c.account.openai_api_key.is_none());
         assert!(!c.account.openai_api_key_verified);
+        assert_eq!(c.account.realtime_endpoint, None);
+        assert_eq!(c.account.custom_realtime_endpoint(), None);
         assert_eq!(c.shortcuts.toggle_translate, "Cmd+Shift+T");
     }
 
@@ -374,6 +394,39 @@ mod tests {
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, c);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn custom_realtime_endpoint_trims_and_treats_blank_as_none() {
+        let mut a = AccountConfig::default();
+        assert_eq!(a.custom_realtime_endpoint(), None);
+        a.realtime_endpoint = Some("   ".into());
+        assert_eq!(a.custom_realtime_endpoint(), None, "blank ⇒ None");
+        a.realtime_endpoint = Some("  ws://127.0.0.1:8000/v1/realtime/translations  ".into());
+        assert_eq!(
+            a.custom_realtime_endpoint(),
+            Some("ws://127.0.0.1:8000/v1/realtime/translations")
+        );
+    }
+
+    #[test]
+    fn realtime_endpoint_round_trips_and_defaults_missing() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("intervox-rt-ep-{}.json", std::process::id()));
+        let mut c = Config::default();
+        c.account.realtime_endpoint =
+            Some("ws://127.0.0.1:8000/v1/realtime/translations?model=gpt-realtime-translate".into());
+        c.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.account.realtime_endpoint, c.account.realtime_endpoint);
+        let _ = std::fs::remove_file(&path);
+
+        // Older configs written before this field default to None (not crash).
+        let cfg: Config = serde_json::from_str(
+            r#"{"version":1,"account":{"openai_api_key":"sk-x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.account.realtime_endpoint, None);
     }
 
     #[test]

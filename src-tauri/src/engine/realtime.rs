@@ -2,10 +2,15 @@
 //!
 //! # Protocol
 //!
-//! Targets the official GA `/v1/realtime/translations` endpoint:
-//! - URL: `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate`
-//! - Headers: `Authorization: Bearer <key>` and `OpenAI-Safety-Identifier: <install-id>`.
-//!   The `OpenAI-Beta: realtime=v1` header was removed in GA and must NOT be sent.
+//! Speaks the official GA `/v1/realtime/translations` wire protocol. The
+//! endpoint URL is supplied by the caller: it defaults to [`REALTIME_URL`]
+//! (OpenAI) but can be any wire-compatible server, e.g. a self-hosted
+//! `open-realtime-translate` instance at `ws://127.0.0.1:8000/...`.
+//! - Headers: `Authorization: Bearer <key>` and `OpenAI-Safety-Identifier:
+//!   <install-id>` — sent only when a non-empty key is provided. An empty key
+//!   (used for self-hosted endpoints that do not validate credentials) sends
+//!   neither header. The `OpenAI-Beta: realtime=v1` header was removed in GA
+//!   and must NOT be sent.
 //! - Uplink audio event type: `session.input_audio_buffer.append`.
 //! - Server-side VAD: no `input_audio_buffer.commit` sent — the server auto-commits turns.
 //!
@@ -34,15 +39,69 @@ use intervox_core::realtime::events::{build_session_update, parse_server_event, 
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
-        client::IntoClientRequest, http::HeaderName, http::HeaderValue, Error as WsError, Message,
+        client::IntoClientRequest, handshake::client::Request, http::HeaderName,
+        http::HeaderValue, Error as WsError, Message,
     },
 };
 
-/// OpenAI Realtime Translation WebSocket endpoint (GA, 2025).
+/// Default OpenAI Realtime Translation WebSocket endpoint (GA, 2025).
 ///
-/// See <https://developers.openai.com/api/docs/guides/realtime-translation>.
+/// Used when no custom endpoint is configured. See
+/// <https://developers.openai.com/api/docs/guides/realtime-translation>.
 pub const REALTIME_URL: &str =
     "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
+
+/// Failure modes when assembling the WebSocket upgrade request. Variants never
+/// carry the API key.
+#[derive(Debug)]
+enum RequestError {
+    /// The endpoint URL could not be parsed into an HTTP upgrade request.
+    Url,
+    /// The API key contains characters invalid for an HTTP header value.
+    KeyHeader,
+    /// The anonymous OpenAI safety identifier could not be created.
+    SafetyId(String),
+    /// The safety identifier is not a valid HTTP header value.
+    SafetyIdHeader,
+}
+
+/// Build the WebSocket upgrade request for `url`.
+///
+/// - `url`: full `ws://` / `wss://` endpoint, including the `?model=` query.
+/// - `key`: Bearer API key. An **empty** key (after trim) means *no auth* —
+///   neither `Authorization` nor `OpenAI-Safety-Identifier` is sent, which is
+///   the path used for wire-compatible self-hosted endpoints that do not
+///   validate credentials. A non-empty key reproduces the exact OpenAI GA
+///   header set.
+///
+/// The key is never logged, including via the returned error.
+fn build_request(url: &str, key: &str) -> Result<Request, RequestError> {
+    let mut request = url.into_client_request().map_err(|_| RequestError::Url)?;
+
+    let key = key.trim();
+    if !key.is_empty() {
+        let headers = request.headers_mut();
+
+        // Authorization header — key is NOT logged anywhere.
+        let auth_value = HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|_| RequestError::KeyHeader)?;
+        headers.insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            auth_value,
+        );
+
+        // NOTE: `OpenAI-Beta: realtime=v1` was removed in the GA release of
+        // /v1/realtime/translations.  Do NOT re-add it.
+
+        // Stable, anonymous, non-PII install identifier required by the GA
+        // translations endpoint. Value must not be logged.
+        let sid = safety_identifier().map_err(RequestError::SafetyId)?;
+        let sid_val = HeaderValue::from_str(&sid).map_err(|_| RequestError::SafetyIdHeader)?;
+        headers.insert(HeaderName::from_static("openai-safety-identifier"), sid_val);
+    }
+
+    Ok(request)
+}
 
 /// Capped exponential backoff for reconnect attempts.
 ///
@@ -147,10 +206,14 @@ fn resolve_safety_identifier() -> Result<String, String> {
     Ok(new_id)
 }
 
-/// Run the OpenAI Realtime transport.
+/// Run the Realtime Translation transport.
 ///
 /// # Parameters
-/// - `key`: The Bearer API key (never logged).
+/// - `url`: The full `ws://` / `wss://` endpoint (default [`REALTIME_URL`] or a
+///   custom wire-compatible server).
+/// - `key`: The Bearer API key (never logged). An empty string means *no auth*:
+///   neither `Authorization` nor `OpenAI-Safety-Identifier` is sent (used for
+///   self-hosted endpoints that do not validate credentials).
 /// - `tgt_lang`: BCP-47 target output language code (source is auto-detected
 ///   by the endpoint and is not configurable).
 /// - `pcm_rx`: Incoming 24 kHz mono PCM16 frames from the graph loop (uplink).
@@ -161,6 +224,7 @@ fn resolve_safety_identifier() -> Result<String, String> {
 /// - `ev_tx` is closed (consumer gone / engine shutting down), or
 /// - The task is aborted via `JoinHandle::abort()`.
 pub async fn run(
+    url: String,
     key: String,
     tgt_lang: String,
     mut pcm_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
@@ -171,71 +235,52 @@ pub async fn run(
 
     loop {
         // ── Build the HTTP upgrade request ────────────────────────────────────
-        let mut request = match REALTIME_URL.into_client_request() {
+        let request = match build_request(&url, &key) {
             Ok(r) => r,
-            Err(e) => {
-                // Malformed constant — should never happen; log without the key.
-                eprintln!("[realtime] URL parse error: {e}");
+            Err(RequestError::Url) => {
+                // Malformed endpoint URL — non-retriable; never log the URL or
+                // key. Surface to the UI so a bad custom endpoint is visible.
+                eprintln!("[realtime] endpoint URL parse error");
+                let _ = ev_tx
+                    .send(TranslationEvent::Error {
+                        code: Some("ENDPOINT".into()),
+                        message: "Realtime endpoint URL is invalid".into(),
+                    })
+                    .await;
+                return RunExit::Terminal;
+            }
+            Err(RequestError::KeyHeader) => {
+                eprintln!("[realtime] invalid key format for header");
+                // Key is bad; no point retrying — surface error and exit.
+                let _ = ev_tx
+                    .send(TranslationEvent::Error {
+                        code: Some("AUTH".into()),
+                        message: "API key contains invalid header characters".into(),
+                    })
+                    .await;
+                return RunExit::Terminal;
+            }
+            Err(RequestError::SafetyId(e)) => {
+                eprintln!("[realtime] safety identifier error: {e}");
+                let _ = ev_tx
+                    .send(TranslationEvent::Error {
+                        code: Some("SAFETY_IDENTIFIER".into()),
+                        message: "Cannot create the anonymous OpenAI safety identifier".into(),
+                    })
+                    .await;
+                return RunExit::Terminal;
+            }
+            Err(RequestError::SafetyIdHeader) => {
+                eprintln!("[realtime] invalid safety identifier header");
+                let _ = ev_tx
+                    .send(TranslationEvent::Error {
+                        code: Some("SAFETY_IDENTIFIER".into()),
+                        message: "Anonymous OpenAI safety identifier is invalid".into(),
+                    })
+                    .await;
                 return RunExit::Terminal;
             }
         };
-
-        {
-            let headers = request.headers_mut();
-
-            // Authorization header — key is NOT logged anywhere.
-            let auth_value = match HeaderValue::from_str(&format!("Bearer {key}")) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[realtime] invalid key format for header: {e}");
-                    // Key is bad; no point retrying — surface error and exit.
-                    let _ = ev_tx
-                        .send(TranslationEvent::Error {
-                            code: Some("AUTH".into()),
-                            message: "API key contains invalid header characters".into(),
-                        })
-                        .await;
-                    return RunExit::Terminal;
-                }
-            };
-            headers.insert(
-                tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
-                auth_value,
-            );
-
-            // NOTE: `OpenAI-Beta: realtime=v1` was removed in the GA release of
-            // /v1/realtime/translations.  Do NOT re-add it.
-
-            // Stable, anonymous, non-PII install identifier required by the GA
-            // translations endpoint. Value must not be logged.
-            let sid = match safety_identifier() {
-                Ok(sid) => sid,
-                Err(e) => {
-                    eprintln!("[realtime] safety identifier error: {e}");
-                    let _ = ev_tx
-                        .send(TranslationEvent::Error {
-                            code: Some("SAFETY_IDENTIFIER".into()),
-                            message: "Cannot create the anonymous OpenAI safety identifier".into(),
-                        })
-                        .await;
-                    return RunExit::Terminal;
-                }
-            };
-            let sid_val = match HeaderValue::from_str(&sid) {
-                Ok(value) => value,
-                Err(e) => {
-                    eprintln!("[realtime] invalid safety identifier header: {e}");
-                    let _ = ev_tx
-                        .send(TranslationEvent::Error {
-                            code: Some("SAFETY_IDENTIFIER".into()),
-                            message: "Anonymous OpenAI safety identifier is invalid".into(),
-                        })
-                        .await;
-                    return RunExit::Terminal;
-                }
-            };
-            headers.insert(HeaderName::from_static("openai-safety-identifier"), sid_val);
-        }
 
         // ── Connect ───────────────────────────────────────────────────────────
         match connect_async(request).await {
@@ -385,8 +430,59 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{backoff, safety_identifier, REALTIME_URL};
+    use super::{build_request, backoff, safety_identifier, RequestError, REALTIME_URL};
     use std::time::Duration;
+
+    // ── build_request ─────────────────────────────────────────────────────────
+
+    const AUTH: &str = "authorization";
+    const SID: &str = "openai-safety-identifier";
+
+    #[test]
+    fn build_request_empty_key_sends_no_auth_headers() {
+        // Self-hosted / wire-compatible endpoint that does not validate creds.
+        let url = "ws://127.0.0.1:8000/v1/realtime/translations?model=gpt-realtime-translate";
+        let req = build_request(url, "").expect("plain ws url must build");
+        assert!(
+            !req.headers().contains_key(AUTH),
+            "empty key must NOT send Authorization"
+        );
+        assert!(
+            !req.headers().contains_key(SID),
+            "empty key must NOT send the safety identifier"
+        );
+        // Whitespace-only key is also treated as "no auth".
+        let req2 = build_request(url, "   ").expect("ws url must build");
+        assert!(!req2.headers().contains_key(AUTH));
+        assert!(!req2.headers().contains_key(SID));
+    }
+
+    #[test]
+    fn build_request_with_key_sends_openai_headers() {
+        let req = build_request(REALTIME_URL, "sk-test-key-1234567890")
+            .expect("default url + key must build");
+        let auth = req
+            .headers()
+            .get(AUTH)
+            .expect("Authorization must be present")
+            .to_str()
+            .unwrap();
+        assert_eq!(auth, "Bearer sk-test-key-1234567890");
+        assert!(
+            req.headers().contains_key(SID),
+            "a non-empty key must also send the safety identifier"
+        );
+    }
+
+    #[test]
+    fn build_request_rejects_malformed_url() {
+        // A space in the authority is not a valid URI and cannot be parsed
+        // into an HTTP upgrade request.
+        match build_request("ws://bad host/path", "") {
+            Err(RequestError::Url) => {}
+            other => panic!("expected Err(RequestError::Url), got {other:?}"),
+        }
+    }
 
     /// Red → Green: backoff must implement 250 ms base, doubling, 5 s cap.
     ///

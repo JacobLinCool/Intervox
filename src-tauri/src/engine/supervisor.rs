@@ -90,7 +90,9 @@ pub fn should_restart(mode_needs_openai: bool, cancelled: bool) -> bool {
 /// the WS connection is torn down promptly.
 ///
 /// # Parameters
-/// - `key` / `tgt_lang`: forwarded to `realtime::run`.
+/// - `url` / `key` / `tgt_lang`: forwarded to `realtime::run`. `url` is the
+///   default OpenAI endpoint or a custom wire-compatible one; an empty `key`
+///   means no auth headers.
 /// - `pcm_rx`: uplink receiver.  The supervisor moves it into the first call;
 ///   on restart it is recreated by the caller via `uplink_slot`.
 ///   **Note**: since we reuse channels (minimal design), this is the SAME
@@ -99,6 +101,7 @@ pub fn should_restart(mode_needs_openai: bool, cancelled: bool) -> bool {
 /// - `session_active`: `Arc<AtomicBool>` set true by `start_openai_session_locked`,
 ///   false by `stop_openai_session_locked`.
 pub async fn run_supervised(
+    url: String,
     key: String,
     tgt_lang: String,
     pcm_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
@@ -219,6 +222,7 @@ pub async fn run_supervised(
 
         // Run the realtime transport (owns relay_rx for this invocation).
         let run_exit = realtime::run(
+            url.clone(),
             key.clone(),
             tgt_lang.clone(),
             relay_rx,

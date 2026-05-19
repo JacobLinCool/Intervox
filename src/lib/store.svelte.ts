@@ -155,6 +155,7 @@ class Store {
     verified: false,
     maskedKey: null,
     lastVerified: null,
+    realtimeEndpoint: null,
     monthMinutes: 0,
     monthUsd: 0,
     totalMinutes: 0,
@@ -619,6 +620,21 @@ class Store {
     }
   }
 
+  async setRealtimeEndpoint(endpoint: string): Promise<void> {
+    try {
+      this.account = await cmd.setRealtimeEndpoint(endpoint);
+      this.pushToast(
+        "success",
+        endpoint.trim() ? "Custom endpoint saved" : "Reverted to OpenAI endpoint",
+      );
+    } catch (e: unknown) {
+      if (e && typeof e === "object" && "code" in e && "message" in e) {
+        this.lastError = e as AppError;
+      }
+      this.pushToast("error", "Couldn't save the endpoint");
+    }
+  }
+
   async verifyApiKey(): Promise<void> {
     try {
       this.account = await cmd.verifyApiKey();
@@ -635,16 +651,23 @@ class Store {
       this.pushToast("error", "Couldn't remove the key");
       return;
     }
-    this.account = {
-      hasKey: false,
-      verified: false,
-      maskedKey: null,
-      lastVerified: null,
-      monthMinutes: 0,
-      monthUsd: 0,
-      totalMinutes: 0,
-      totalUsd: 0,
-    };
+    // Re-read status instead of hardcoding: a configured custom endpoint
+    // survives "Remove key" and keeps the session usable.
+    try {
+      this.account = await cmd.getAccountStatus();
+    } catch {
+      this.account = {
+        hasKey: false,
+        verified: false,
+        maskedKey: null,
+        lastVerified: null,
+        realtimeEndpoint: this.account.realtimeEndpoint,
+        monthMinutes: 0,
+        monthUsd: 0,
+        totalMinutes: 0,
+        totalUsd: 0,
+      };
+    }
     this.pushToast("success", "API key removed");
   }
 

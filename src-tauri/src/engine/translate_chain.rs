@@ -38,11 +38,11 @@
 //! ```
 //!
 //! The jitter buffer is constructed with:
-//!   - target_ms = 120  → primes after ~120 ms of buffered audio
-//!   - max_ms    = 400  → oldest samples dropped when buffer exceeds 400 ms
+//!   - target_ms = 200  → primes after ~200 ms of buffered audio
+//!   - max_ms    = 600  → oldest samples dropped when buffer exceeds 600 ms
 //!
 //! This keeps end-to-end translate latency low while absorbing OpenAI network
-//! bursts of up to ~400 ms without overrun artefacts.
+//! bursts of up to ~400 ms (the target→max headroom) without overrun artefacts.
 
 use intervox_core::audio::{
     jitter_buffer::JitterBuffer,
@@ -212,14 +212,20 @@ pub fn mix_translated_with_original(
 // ── Jitter-buffer construction parameters ─────────────────────────────────────
 
 /// Target fill before the jitter buffer starts yielding data (spec §7.3).
-/// 120 ms at 48 kHz = 5 760 frames.  Chosen to absorb typical OpenAI burst
-/// inter-arrival while keeping end-to-end translate latency perceptible but
-/// acceptable.
-pub const JB_TARGET_MS: u32 = 120;
+/// 200 ms at 48 kHz = 9 600 frames.  Raised from 120 ms to absorb longer OpenAI
+/// network gaps so brief bursts no longer drain the queue into an underrun (and
+/// the costly re-prime silence that follows).  Trades ~80 ms of extra
+/// end-to-end translate latency for noticeably steadier playback.
+pub const JB_TARGET_MS: u32 = 200;
 
 /// Hard upper bound on buffer depth.  When exceeded, oldest samples are dropped
-/// (overrun protection, spec §7.3).  400 ms at 48 kHz = 19 200 frames.
-pub const JB_MAX_MS: u32 = 400;
+/// (overrun protection, spec §7.3) — a mid-stream waveform jump audible as a
+/// crackle.  Raised from 400 ms to 600 ms so the target→max burst headroom
+/// (`JB_MAX_MS - JB_TARGET_MS` = 400 ms) comfortably exceeds the original
+/// 280 ms, absorbing larger OpenAI bursts without dropping samples.  600 ms at
+/// 48 kHz = 28 800 frames; this is the hard latency ceiling, only approached
+/// under sustained faster-than-realtime delivery.
+pub const JB_MAX_MS: u32 = 600;
 
 /// Pull block size: 10 ms of mono 48 kHz audio = 480 samples.
 pub const PULL_FRAMES: usize = 480;

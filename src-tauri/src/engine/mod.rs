@@ -1247,6 +1247,16 @@ impl Engine {
                 .unwrap()
                 .clone()
         };
+        // Resolve the realtime endpoint. A custom (wire-compatible) endpoint
+        // overrides the default OpenAI URL and makes the API key optional;
+        // the default OpenAI endpoint still requires a key.
+        let custom_endpoint = cfg
+            .account
+            .custom_realtime_endpoint()
+            .map(str::to_string);
+        let url = custom_endpoint
+            .clone()
+            .unwrap_or_else(|| realtime::REALTIME_URL.to_string());
         let key = match cfg
             .account
             .openai_api_key
@@ -1255,6 +1265,8 @@ impl Engine {
             .filter(|s| !s.is_empty())
         {
             Some(k) => k.to_string(),
+            // Custom endpoint: no key needed — connect without auth headers.
+            None if custom_endpoint.is_some() => String::new(),
             None => {
                 let _ = self.app.emit(
                     "error",
@@ -1347,6 +1359,7 @@ impl Engine {
         // with capped backoff.  Aborting the JoinHandle cancels the supervisor,
         // which propagates to the currently-awaited `run` future.
         let rt_task = tauri::async_runtime::spawn(supervisor::run_supervised(
+            url,
             key,
             tgt_lang,
             pcm_rx,

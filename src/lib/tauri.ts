@@ -79,6 +79,7 @@ export interface AppError {
 export interface AccountStatus {
   hasKey: boolean; verified: boolean;
   maskedKey: string | null; lastVerified: string | null;
+  realtimeEndpoint: string | null;
   monthMinutes: number; monthUsd: number; totalMinutes: number; totalUsd: number;
 }
 export type MicPermission = "granted" | "denied" | "notDetermined" | "restricted";
@@ -114,6 +115,7 @@ export interface Config {
     openai_api_key: string | null;
     openai_api_key_verified: boolean;
     openai_api_key_last_verified: string | null;
+    realtime_endpoint: string | null;
   };
   shortcuts: { toggle_translate: string; silence: string; captions: string };
   onboarding_completed: boolean;
@@ -145,6 +147,8 @@ export const cmd = {
   setPrivacyConfig: (p: Config["privacy"]) => invoke("set_privacy_config", { p }),
   setShortcuts: (s: Config["shortcuts"]) => invoke("set_shortcuts", { s }),
   setApiKey: (key: string) => invoke<AccountStatus>("set_api_key", { key }),
+  setRealtimeEndpoint: (endpoint: string) =>
+    invoke<AccountStatus>("set_realtime_endpoint", { endpoint }),
   verifyApiKey: () => invoke<AccountStatus>("verify_api_key"),
   clearApiKey: () => invoke("clear_api_key"),
   installVirtualMic: () => invoke("install_virtual_mic"),

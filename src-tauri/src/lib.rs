@@ -619,6 +619,7 @@ pub fn run() {
             commands::get_config,
             commands::get_account_status,
             commands::set_api_key,
+            commands::set_realtime_endpoint,
             commands::verify_api_key,
             commands::clear_api_key,
             commands::set_mix_percent,

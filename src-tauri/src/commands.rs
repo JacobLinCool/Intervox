@@ -714,6 +714,9 @@ pub struct AccountStatus {
     pub verified: bool,
     pub masked_key: Option<String>,
     pub last_verified: Option<String>,
+    /// Custom wire-compatible Realtime endpoint, if configured. `None` means
+    /// the default OpenAI endpoint (which requires a verified key).
+    pub realtime_endpoint: Option<String>,
     pub month_minutes: f64,
     pub month_usd: f64,
     pub total_minutes: f64,
@@ -735,12 +738,17 @@ pub(crate) fn mask_key(k: &str) -> String {
 fn account_status(account: &AccountConfig) -> AccountStatus {
     let key = account.openai_api_key.as_deref().filter(|s| !s.is_empty());
     let masked = key.map(mask_key);
+    let custom_endpoint = account.custom_realtime_endpoint().map(str::to_string);
     let u = crate::usage_store::load();
     AccountStatus {
         has_key: key.is_some(),
-        verified: key.is_some() && account.openai_api_key_verified,
+        // A custom endpoint is "ready" without a key (key is optional there);
+        // the default OpenAI endpoint still needs a verified key.
+        verified: custom_endpoint.is_some()
+            || (key.is_some() && account.openai_api_key_verified),
         masked_key: masked,
         last_verified: account.openai_api_key_last_verified.clone(),
+        realtime_endpoint: custom_endpoint,
         month_minutes: u.month_minutes(),
         month_usd: u.month_usd(),
         total_minutes: u.total_minutes(),
@@ -761,6 +769,32 @@ pub fn set_api_key(h: tauri::State<AppHandle>, key: String) -> Result<AccountSta
         cfg.account.openai_api_key = (!key.is_empty()).then(|| key.to_string());
         cfg.account.openai_api_key_verified = false;
         cfg.account.openai_api_key_last_verified = None;
+    })?;
+    Ok(account_status(&cfg.account))
+}
+
+/// Set (or, with an empty string, clear) the custom Realtime endpoint.
+///
+/// When set, Intervox connects here instead of OpenAI, which lets it talk to
+/// any wire-compatible server (e.g. a self-hosted `open-realtime-translate`).
+/// Must be a full `ws://` or `wss://` URL. Clearing it restores the default
+/// OpenAI endpoint. The API key is left untouched.
+#[tauri::command]
+pub fn set_realtime_endpoint(
+    h: tauri::State<AppHandle>,
+    endpoint: String,
+) -> Result<AccountStatus, AppError> {
+    let endpoint = endpoint.trim();
+    let is_ws_url =
+        endpoint.starts_with("ws://") || endpoint.starts_with("wss://");
+    if !endpoint.is_empty() && !is_ws_url {
+        return Err(AppError::invalid_config(
+            "Realtime endpoint must start with ws:// or wss://",
+        ));
+    }
+    let cfg = update_config(&h, |cfg| {
+        cfg.account.realtime_endpoint =
+            (!endpoint.is_empty()).then(|| endpoint.to_string());
     })?;
     Ok(account_status(&cfg.account))
 }
@@ -884,7 +918,11 @@ fn unix_secs_to_utc(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
 #[tauri::command]
 pub fn clear_api_key(h: tauri::State<AppHandle>) -> Result<(), AppError> {
     update_config(&h, |cfg| {
-        cfg.account = AccountConfig::default();
+        // Clear only the key fields; a configured custom Realtime endpoint is
+        // independent of the OpenAI key and must survive "Remove key".
+        cfg.account.openai_api_key = None;
+        cfg.account.openai_api_key_verified = false;
+        cfg.account.openai_api_key_last_verified = None;
     })?;
     Ok(())
 }

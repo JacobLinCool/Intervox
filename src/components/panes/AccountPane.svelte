@@ -38,6 +38,33 @@
     await store.clearApiKey();
     draft = "";
   }
+
+  // ── Custom endpoint (advanced) ───────────────────────────────
+  let epDraft = $state("");
+  let epSaving = $state(false);
+  let epError: string | null = $state(null);
+  const customEndpoint = $derived(store.account.realtimeEndpoint);
+  const epLooksValid = $derived(
+    /^wss?:\/\/.+/.test(epDraft.trim()),
+  );
+
+  async function saveEndpoint() {
+    epError = null;
+    if (!epLooksValid) {
+      epError = "Enter a full ws:// or wss:// URL.";
+      return;
+    }
+    epSaving = true;
+    await store.setRealtimeEndpoint(epDraft.trim());
+    epSaving = false;
+    epDraft = "";
+  }
+
+  async function resetEndpoint() {
+    epError = null;
+    await store.setRealtimeEndpoint("");
+    epDraft = "";
+  }
 </script>
 
 <PaneTitle
@@ -167,6 +194,93 @@
         {/if}
       </div>
     {/if}
+  </Row>
+</FieldGroup>
+
+<FieldGroup
+  title="Custom endpoint"
+  hint="Advanced. Point Intervox at any server that speaks the OpenAI Realtime Translation protocol — e.g. a self-hosted, fully local open-realtime-translate instance. Leave unset to use OpenAI."
+>
+  <Row extraStyle={{ padding: "14px", flexDirection: "column", alignItems: "stretch" }}>
+    <div style={css({ display: "flex", alignItems: "center", gap: 12 })}>
+      <div style={css({ flex: 1 })}>
+        {#if customEndpoint}
+          <div style={css({ fontSize: 13, fontWeight: 500 })}>Using a custom endpoint</div>
+          <div class="mono" style={css({ fontSize: 11.5, color: "var(--txt-3)", marginTop: 2, wordBreak: "break-all" })}>
+            {customEndpoint}
+          </div>
+        {:else}
+          <div style={css({ fontSize: 13, fontWeight: 500 })}>Using OpenAI</div>
+          <div style={css({ fontSize: 11.5, color: "var(--txt-3)", marginTop: 2 })}>
+            api.openai.com — the default Realtime Translation endpoint.
+          </div>
+        {/if}
+      </div>
+      {#if customEndpoint}
+        <button class="btn" onclick={resetEndpoint} style={css({ fontSize: 12 })}>Use OpenAI</button>
+      {/if}
+    </div>
+
+    <div style={css({ marginTop: 12 })}>
+      <div
+        style={css({
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 6px 6px 12px",
+          background: "var(--control-bg)",
+          border: `1px solid ${epError ? "var(--c-error)" : "var(--control-border)"}`,
+          borderRadius: 8,
+        })}
+      >
+        <input
+          type="text"
+          value={epDraft}
+          oninput={(e) => { epDraft = (e.currentTarget as HTMLInputElement).value; epError = null; }}
+          placeholder="ws://127.0.0.1:8000/v1/realtime/translations?model=gpt-realtime-translate"
+          spellcheck={false}
+          autocomplete="off"
+          disabled={epSaving}
+          style={css({
+            flex: 1,
+            border: "none",
+            outline: "none",
+            background: "transparent",
+            fontFamily: "ui-monospace, SF Mono, Menlo, monospace",
+            fontSize: 12.5,
+            padding: "5px 0",
+            color: "var(--txt-1)",
+          })}
+        />
+        <button
+          class="btn primary"
+          onclick={saveEndpoint}
+          disabled={!epDraft || epSaving}
+          style={css({ padding: "5px 12px", fontSize: 12.5, opacity: epDraft ? 1 : 0.5 })}
+        >
+          {epSaving ? "Saving…" : "Save"}
+        </button>
+      </div>
+
+      {#if epError}
+        <div
+          style={css({
+            marginTop: 8,
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            fontSize: 12,
+            color: "var(--c-error)",
+            lineHeight: 1.45,
+          })}
+        >
+          <SysIcon name="warn" size={13} /><span>{epError}</span>
+        </div>
+      {/if}
+      <div style={css({ marginTop: 8, fontSize: 11.5, color: "var(--txt-3)", lineHeight: 1.5 })}>
+        With a custom endpoint the API key is optional — local servers usually don't validate it.
+      </div>
+    </div>
   </Row>
 </FieldGroup>
 
